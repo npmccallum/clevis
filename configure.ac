@@ -12,9 +12,8 @@ LT_INIT([disable-static])
 
 PKG_PROG_PKG_CONFIG([0.25])
 
-PKG_CHECK_MODULES([LIBCRYPTO], [libcrypto])
-PKG_CHECK_MODULES([JANSSON], [jansson])
-PKG_CHECK_MODULES([CURL], [libcurl])
+PKG_CHECK_MODULES([jose], [jose])
+PKG_CHECK_MODULES([curl], [libcurl])
 
 CLEVIS_CFLAGS="\
 -Wall \
@@ -36,7 +35,7 @@ CLEVIS_CFLAGS="\
 "
 AC_SUBST([CLEVIS_CFLAGS])
 
-AC_SUBST([CLEVIS_PINDIR], [${libdir}/${PACKAGE_NAME}])
+AC_SUBST([CLEVIS_PINDIR], [${libdir}/${PACKAGE_NAME}/pins])
 AX_DEFINE_DIR(CLEVIS_PINDIR, CLEVIS_PINDIR, [Location of pins (plugins)])
 
 AC_CONFIG_FILES([clevis.pc Makefile src/Makefile])

@@ -1,3 +1,4 @@
+/* vim: set tabstop=8 shiftwidth=4 softtabstop=4 expandtab smarttab colorcolumn=80: */
 /*
  * Copyright (c) 2015 Red Hat, Inc.
  * Author: Nathaniel McCallum <npmccallum@redhat.com>
@@ -17,19 +18,13 @@
  */
 
 #pragma once
+#include <jansson.h>
 
-#include "clevis.h"
+json_t *
+sss_generate(size_t key_bytes, size_t threshold);
 
-typedef struct {
-  clevis_pin_f *pin;
-  void *dll;
-} pin_t;
+json_t *
+sss_point(const json_t *sss);
 
-bool
-pin_name(json_t *layout);
-
-pin_t *
-pin_load(const char *type);
-
-void
-pin_free(pin_t *pin);
+json_t *
+sss_recover(const json_t *p, const json_t *points);
