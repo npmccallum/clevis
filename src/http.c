@@ -19,15 +19,9 @@
 /* FIXME: this code copies the key into unprotected memory. */
 
 #define _GNU_SOURCE
-#include "clevis.h"
 
 #include <string.h>
 #include <curl/curl.h>
-
-struct state {
-  clevis_buf_t *buf;
-  size_t pos;
-};
 
 struct header {
   const char *fmt;

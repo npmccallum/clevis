@@ -27,6 +27,7 @@
 #include <string.h>
 
 #define BIGNUM_auto __attribute__((cleanup(BN_cleanup))) BIGNUM
+#define BN_CTX_auto __attribute__((cleanup(BN_CTX_cleanup))) BN_CTX
 
 static void
 clear_free(void *mem, size_t len)
@@ -107,6 +108,13 @@ bn_encode_json(const BIGNUM *bn, size_t len)
 }
 
 static void
+BN_CTX_cleanup(BN_CTX **ctx)
+{
+    if (ctx)
+        BN_CTX_free(*ctx);
+}
+
+static void
 BN_cleanup(BIGNUM **bnp)
 {
     if (bnp)
@@ -154,24 +162,28 @@ error:
     return NULL;
 }
 
-json_t *
-sss_point(const json_t *sss)
+uint8_t *
+sss_point(const json_t *sss, size_t *len)
 {
+    BN_CTX_auto *ctx = NULL;
     BIGNUM_auto *tmp = NULL;
     BIGNUM_auto *xx = NULL;
     BIGNUM_auto *yy = NULL;
     BIGNUM_auto *pp = NULL;
+    uint8_t *key = NULL;
+    json_t *out = NULL;
     json_t *p = NULL;
     json_int_t t = 0;
 
     if (json_unpack((json_t *) sss, "{s:I,s:o}", "t", &t, "p", &p) != 0)
         return NULL;
 
+    ctx = BN_CTX_new();
     pp = bn_decode_json(p);
     xx = BN_new();
     yy = BN_new();
     tmp = BN_new();
-    if (!pp || !xx || !yy || !tmp)
+    if (!ctx || !pp || !xx || !yy || !tmp)
         return NULL;
 
     if (BN_rand_range(xx, pp) <= 0)
@@ -205,24 +217,33 @@ sss_point(const json_t *sss)
             return NULL;
     }
 
-    return bn_encode_json(yy, jose_b64_dlen(json_string_length(p)));
+    *len = jose_b64_dlen(json_string_length(p));
+    key = malloc(*len);
+    if (!key)
+        return NULL;
+
+    if (!bn_encode(xx, key, *len) || !bn_encode(yy, &key[*len], *len)) {
+        memset(key, 0, *len * 2);
+        free(key);
+        return NULL;
+    }
+
+    *len *= 2;
+    return key;
 }
 
 json_t *
 sss_recover(const json_t *p, const json_t *points)
 {
+    BN_CTX_auto *ctx = BN_CTX_new();
+    BIGNUM_auto *pp = bn_decode_json(p);
     BIGNUM_auto *acc = BN_new();
     BIGNUM_auto *tmp = BN_new();
     BIGNUM_auto *k = BN_new();
-    BIGNUM_auto *pp = NULL;
     json_t *pnto = NULL;
     size_t i = 0;
 
-    if (!acc || !tmp || !k)
-        return NULL;
-
-    pp = bn_decode_json(p);
-    if (!pp)
+    if (!ctx || !pp || !acc || !tmp || !k)
         return NULL;
 
     if (BN_zero(k) <= 0)
@@ -232,10 +253,18 @@ sss_recover(const json_t *p, const json_t *points)
         BIGNUM_auto *xo = NULL; /* Outer X */
         BIGNUM_auto *yo = NULL; /* Outer Y */
         json_t *pnti = NULL;
+        uint8_t *xy = NULL;
+        size_t xyl = 0;
         size_t j = 0;
 
-        xo = bn_decode_json(json_array_get(pnto, 0));
-        yo = bn_decode_json(json_array_get(pnto, 1));
+        xy = jose_b64_decode_json(pnto, &xyl);
+        if (!xy)
+            return NULL;
+
+        xo = bn_decode(xy, xyl / 2);
+        yo = bn_decode(&xy[xyl / 2], xyl / 2);
+        memset(xy, 0, xyl);
+        free(xy);
         if (!xo || !yo)
             return NULL;
 
@@ -248,7 +277,13 @@ sss_recover(const json_t *p, const json_t *points)
             if (pnto == pnti)
                 continue;
 
-            xi = bn_decode_json(json_array_get(pnti, 0));
+            xy = jose_b64_decode_json(pnti, &xyl);
+            if (!xy)
+                return NULL;
+
+            xi = bn_decode(xy, xyl / 2);
+            memset(xy, 0, xyl);
+            free(xy);
             if (!xi)
                 return NULL;
 

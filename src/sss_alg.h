@@ -19,12 +19,13 @@
 
 #pragma once
 #include <jansson.h>
+#include <stdint.h>
 
 json_t *
 sss_generate(size_t key_bytes, size_t threshold);
 
-json_t *
-sss_point(const json_t *sss);
+uint8_t *
+sss_point(const json_t *sss, size_t *len);
 
 json_t *
 sss_recover(const json_t *p, const json_t *points);
