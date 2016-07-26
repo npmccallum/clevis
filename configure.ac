@@ -12,7 +12,7 @@ LT_INIT([disable-static])
 
 PKG_PROG_PKG_CONFIG([0.25])
 
-PKG_CHECK_MODULES([jose], [jose])
+PKG_CHECK_MODULES([jose], [jose-openssl])
 
 AC_CHECK_HEADER([http_parser.h], [], [AC_MSG_ERROR([http-parser required!])])
 AC_SEARCH_LIBS([http_parser_execute], [http_parser], [], [AC_MSG_ERROR([http-parser required!])])
