@@ -17,20 +17,12 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "sss_alg.h"
-
+#include <jose/b64.h>
 #include <jose/jwk.h>
 #include <jose/jwe.h>
-
-#include <sys/types.h>
-#include <sys/wait.h>
-
-#include <errno.h>
-#include <unistd.h>
-#include <signal.h>
-#include <stdbool.h>
-#include <stdint.h>
 #include <string.h>
+
+static const char key[] = "AAAAAAAAAAAAAAAAAAAAAA";
 
 static uint8_t *
 readall(FILE *file, size_t *len)
@@ -89,21 +81,16 @@ encrypt(int argc, char *argv[])
         goto egress;
     }
 
-    cek = json_pack("{s:s}", "alg", "A128CBC-HS256");
+    cek = json_pack("{s:s,s:s}", "kty", "oct", "k", key);
     if (!cek) {
         fprintf(stderr, "Error making CEK!\n");
         goto egress;
     }
 
-    if (!jose_jwk_generate(cek)) {
-        fprintf(stderr, "Error generating CEK!\n");
-        goto egress;
-    }
-
-    jwe = json_pack("{s:{s:s},s:{s:O,s:O}}",
+    jwe = json_pack("{s:{s:s},s:{s:O}}",
                     "protected", "alg", "dir",
                     "unprotected",
-                        "fail", json_object_get(cfg, "fail"), "cek", cek);
+                        "fail", json_object_get(cfg, "fail"));
     if (!jwe) {
         fprintf(stderr, "Error making JWE!\n");
         goto egress;
@@ -141,8 +128,12 @@ decrypt(int argc, char *argv[])
     if (!jwe)
         goto egress;
 
-    if (json_unpack(jwe, "{s:{s:b,s:o}}",
-                    "unprotected", "fail", &fail, "cek", &cek) < 0 || fail)
+    if (json_unpack(jwe, "{s:{s:b}}",
+                    "unprotected", "fail", &fail) < 0 || fail)
+        goto egress;
+
+    cek = json_pack("{s:s,s:s}", "kty", "oct", "k", key);
+    if (!cek)
         goto egress;
 
     pt = jose_jwe_decrypt(jwe, cek, &ptl);

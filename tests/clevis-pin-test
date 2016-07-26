@@ -1,0 +1,11 @@
+#!/bin/sh -x
+
+trap 'exit' ERR
+
+e=`echo hi | ./clevis-pin-test encrypt '{"fail": false}'`
+d=`echo $e | ./clevis-pin-test decrypt`
+test "$d" == "hi"
+
+e=`echo hi | ./clevis-pin-test encrypt '{"fail": true}'`
+! echo $e | ./clevis-pin-test decrypt
+

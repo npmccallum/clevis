@@ -44,9 +44,7 @@ struct url {
 };
 
 struct ctx {
-    struct body *body;
-    char *hfld;
-    bool hval;
+    struct http_msg *msg;
     bool done;
 };
 
@@ -54,29 +52,51 @@ static int
 on_header_field(http_parser *parser, const char *at, size_t length)
 {
     struct ctx *ctx = parser->data;
-    char *tmp = NULL;
+    char *key = NULL;
     size_t len = 0;
 
-    if (ctx->hval) {
-        free(ctx->hfld);
-        ctx->hfld = NULL;
-        ctx->hval = false;
+    size_t nkeys = 0;
+    size_t nvals = 0;
+
+    while (ctx->msg->head && ctx->msg->head[nkeys].key) {
+        nkeys++;
+        if (!ctx->msg->head[nvals].val)
+            break;
+        nvals++;
     }
 
-    len = ctx->hfld ? strlen(ctx->hfld) : 0;
+    if (nkeys > 100)
+        return -E2BIG;
+
+    if (nkeys == nvals) {
+        struct http_head *head = NULL;
+
+        head = realloc(ctx->msg->head, sizeof(*head) * (nkeys + 2));
+        if (!head)
+            return -ENOMEM;
+
+        ctx->msg->head = head;
+        ctx->msg->head[nkeys].key = NULL;
+        ctx->msg->head[nkeys].val = NULL;
+        ctx->msg->head[nkeys + 1].key = NULL;
+        ctx->msg->head[nkeys + 1].val = NULL;
+    } else {
+        free(ctx->msg->head[--nkeys].key);
+        ctx->msg->head[nkeys].key = NULL;
+    }
+
+    len = ctx->msg->head[nkeys].key ? strlen(ctx->msg->head[nkeys].key) : 0;
     if (len + length + 1 > 4096)
         return -E2BIG;
 
-    tmp = realloc(ctx->hfld, len + length + 1);
-    if (!tmp)
+    key = realloc(ctx->msg->head[nkeys].key, len + length + 1);
+    if (!key)
         return -ENOMEM;
 
-    if (len > 0)
-        strncat(tmp, at, length);
-    else
-        strncpy(tmp, at, length);
+    strncpy(&key[len], at, length);
+    key[len + length] = 0;
 
-    ctx->hfld = tmp;
+    ctx->msg->head[nkeys].key = key;
     return 0;
 }
 
@@ -84,41 +104,28 @@ static int
 on_header_value(http_parser *parser, const char *at, size_t length)
 {
     struct ctx *ctx = parser->data;
-    char *tmp = NULL;
+    char *val = NULL;
     size_t len = 0;
 
-    if (!ctx->hfld)
-        return -EINVAL;
+    size_t nkeys = 0;
 
-    ctx->hval = true;
+    while (ctx->msg->head && ctx->msg->head[nkeys].key)
+        nkeys++;
 
-    if (strcasecmp(ctx->hfld, "Content-Type") != 0)
-        return 0;
+    --nkeys;
 
-    len = ctx->body->type ? strlen(ctx->body->type) : 0;
+    len = ctx->msg->head[nkeys].val ? strlen(ctx->msg->head[nkeys].val) : 0;
     if (len + length + 1 > 4096)
         return -E2BIG;
 
-    tmp = realloc(ctx->body->type, len + length + 1);
-    if (!tmp)
+    val = realloc(ctx->msg->head[nkeys].val, len + length + 1);
+    if (!val)
         return -ENOMEM;
 
-    if (len > 0)
-        strncat(tmp, at, length);
-    else
-        strncpy(tmp, at, length);
+    strncpy(&val[len], at, length);
+    val[len + length] = 0;
 
-    ctx->body->type = tmp;
-    return 0;
-}
-
-static int
-on_headers_complete(http_parser *parser)
-{
-    struct ctx *ctx = parser->data;
-    ctx->hval = false;
-    free(ctx->hfld);
-    ctx->hfld = NULL;
+    ctx->msg->head[nkeys].val = val;
     return 0;
 }
 
@@ -126,18 +133,18 @@ static int
 on_body(http_parser *parser, const char *at, size_t length)
 {
     struct ctx *ctx = parser->data;
-    uint8_t *tmp = NULL;
+    uint8_t *body = NULL;
 
-    if (ctx->body->size + length > 64 * 1024)
+    if (ctx->msg->size + length > 64 * 1024)
         return -E2BIG;
 
-    tmp = realloc(ctx->body->body, ctx->body->size + length);
-    if (!tmp)
+    body = realloc(ctx->msg->body, ctx->msg->size + length);
+    if (!body)
         return -ENOMEM;
 
-    memcpy(&tmp[ctx->body->size], at, length);
-    ctx->body->size += length;
-    ctx->body->body = tmp;
+    memcpy(&body[ctx->msg->size], at, length);
+    ctx->msg->size += length;
+    ctx->msg->body = body;
     return 0;
 }
 
@@ -152,7 +159,6 @@ on_message_complete(http_parser *parser)
 static const http_parser_settings settings = {
     .on_header_field = on_header_field,
     .on_header_value = on_header_value,
-    .on_headers_complete = on_headers_complete,
     .on_body = on_body,
     .on_message_complete = on_message_complete,
 };
@@ -161,34 +167,25 @@ static const http_parser_settings settings = {
     snprintf(&pkt->buf[pkt->len], sizeof(pkt->buf) - pkt->len, __VA_ARGS__)
 
 static int
-mkpkt(struct packet *pkt, const char *host, const char *path,
-      const char *method, const struct header headers[],
-      const struct body *in)
+mkpkt(struct packet *pkt, const struct url *url,
+      const char *method, const struct http_msg *msg)
 {
-    pkt->len += append(pkt, "%s %s HTTP/1.1\r\n", method, path);
+    pkt->len += append(pkt, "%s %s HTTP/1.1\r\n", method, url->path);
     if (pkt->len > sizeof(pkt->buf))
         return E2BIG;
 
-    pkt->len += append(pkt, "Host: %s\r\n", host);
+    pkt->len += append(pkt, "Host: %s\r\n", url->host);
     if (pkt->len > sizeof(pkt->buf))
         return E2BIG;
 
-    if (in) {
-        if (in->type) {
-            pkt->len += append(pkt, "Content-Type: %s\r\n", in->type);
-            if (pkt->len > sizeof(pkt->buf))
-                return E2BIG;
-        }
+    pkt->len += append(pkt, "Content-Length: %zu\r\n", msg ? msg->size : 0);
+    if (pkt->len > sizeof(pkt->buf))
+        return E2BIG;
 
-        pkt->len += append(pkt, "Content-Length: %zu\r\n", in->size);
-        if (pkt->len > sizeof(pkt->buf))
-            return E2BIG;
-    }
-
-    if (headers) {
-        for (size_t i = 0; headers[i].key && headers[i].val; i++) {
+    if (msg && msg->head) {
+        for (size_t i = 0; msg->head[i].key && msg->head[i].val; i++) {
             pkt->len += append(pkt, "%s: %s\r\n",
-                              headers[i].key, headers[i].val);
+                               msg->head[i].key, msg->head[i].val);
             if (pkt->len > sizeof(pkt->buf))
                 return E2BIG;
         }
@@ -198,12 +195,12 @@ mkpkt(struct packet *pkt, const char *host, const char *path,
     if (pkt->len > sizeof(pkt->buf))
         return E2BIG;
 
-    if (in) {
-        if (pkt->len + in->size > sizeof(pkt->buf))
+    if (msg) {
+        if (pkt->len + msg->size > sizeof(pkt->buf))
             return E2BIG;
 
-        memcpy(&pkt->buf[pkt->len], in->body, in->size);
-        pkt->len += in->size;
+        memcpy(&pkt->buf[pkt->len], msg->body, msg->size);
+        pkt->len += msg->size;
     }
 
     return 0;
@@ -258,9 +255,32 @@ url_parse(const char *url, struct url *out)
     return 0;
 }
 
+void
+http_msg_free(struct http_msg *msg)
+{
+    if (!msg)
+        return;
+
+    for (size_t i = 0; msg->head && msg->head[i].key; i++) {
+        memset(msg->head[i].key, 0, strlen(msg->head[i].key));
+        if (msg->head[i].val)
+            memset(msg->head[i].val, 0, strlen(msg->head[i].val));
+
+        free(msg->head[i].key);
+        free(msg->head[i].val);
+    }
+
+    if (msg->body && msg->size > 0)
+        memset(msg->body, 0, msg->size);
+
+    free(msg->head);
+    free(msg->body);
+    free(msg);
+}
+
 int
-http(const char *url, enum http_method m, const struct header headers[],
-     const struct body *in, struct body *out)
+http(const char *url, enum http_method m,
+     const struct http_msg *req, struct http_msg **rep)
 {
     struct addrinfo *ais = NULL;
     const char *method = NULL;
@@ -278,27 +298,35 @@ http(const char *url, enum http_method m, const struct header headers[],
     }
 
     r = url_parse(url, &purl);
-    if (r != 0)
-        return -r;
+    if (r != 0) {
+        errno = r;
+        goto egress;
+    }
 
-    r = mkpkt(&pkt, purl.host, purl.path, method, headers, in);
-    if (r != 0)
-        return -r;
+    r = mkpkt(&pkt, &purl, method, req);
+    if (r != 0) {
+        errno = r;
+        goto egress;
+    }
 
     r = getaddrinfo(purl.host, purl.srvc,
                     &(struct addrinfo) { .ai_socktype = SOCK_STREAM }, &ais);
     switch (r) {
     case 0: break;
-    case EAI_AGAIN: return -EAGAIN;
-    case EAI_BADFLAGS: return -EINVAL;
-    case EAI_FAMILY: return -ENOTSUP;
-    case EAI_MEMORY: return -ENOMEM;
-    case EAI_SERVICE: return -EINVAL;
-    default: return -EIO;
+    case EAI_AGAIN:    errno = EAGAIN;  goto egress;
+    case EAI_BADFLAGS: errno = EINVAL;  goto egress;
+    case EAI_FAMILY:   errno = ENOTSUP; goto egress;
+    case EAI_MEMORY:   errno = ENOMEM;  goto egress;
+    case EAI_SERVICE:  errno = EINVAL;  goto egress;
+    default:           errno = EIO;     goto egress;
     }
 
+    *rep = calloc(1, sizeof(**rep));
+    if (!*rep)
+        goto egress;
+
     for (const struct addrinfo *ai = ais; ai; ai = ai->ai_next) {
-        struct ctx ctx = { .body = out };
+        struct ctx ctx = { .msg = *rep };
         http_parser parser = {};
 
         close(sock);
@@ -316,6 +344,9 @@ http(const char *url, enum http_method m, const struct header headers[],
         http_parser_init(&parser, HTTP_RESPONSE);
         parser.data = &ctx;
 
+        memset(pkt.buf, 0, sizeof(pkt.buf));
+        pkt.len = 0;
+
         for (ssize_t x = 1; x > 0 && !ctx.done; ) {
             size_t sz = 0;
 
@@ -330,20 +361,27 @@ http(const char *url, enum http_method m, const struct header headers[],
                 fprintf(stderr, "Fatal error: %s: %s\n",
                         http_errno_name(parser.http_errno),
                         http_errno_description(parser.http_errno));
+                errno = EINVAL;
                 break;
             }
 
-            pkt.buf[pkt.len] -= sz;
+            pkt.len -= sz;
             memmove(pkt.buf, &pkt.buf[sz], pkt.len);
         }
 
         if (ctx.done)
             errno = -parser.status_code;
 
-        free(ctx.body);
         break;
     }
 
+egress:
+    if (errno > 0) {
+        http_msg_free(*rep);
+        *rep = NULL;
+    }
+
+    url_free_contents(&purl);
     freeaddrinfo(ais);
     close(sock);
     return -errno;

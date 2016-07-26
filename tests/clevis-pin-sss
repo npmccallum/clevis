@@ -1,11 +1,6 @@
-#!/bin/sh
+#!/bin/sh -x
 
-set -x
-trap 'exit' ERR
-
-e=`echo hi | ./clevis-pin-test encrypt '{"fail": false}'`
-d=`echo $e | ./clevis-pin-test decrypt`
-test "$d" == "hi"
+trap 'onerr' ERR
 
 e=`echo hi | ./clevis-pin-sss encrypt '{"t": 1, "pins": {"test": [{"fail": false}, {"fail": false}]}}'`
 d=`echo $e | ./clevis-pin-sss decrypt`
@@ -34,3 +29,4 @@ e=`echo hi | ./clevis-pin-sss encrypt '{"t": 2, "pins": {"test": [{"fail": false
 
 e=`echo hi | ./clevis-pin-sss encrypt '{"t": 2, "pins": {"test": [{"fail": true}, {"fail": true}]}}'`
 ! echo $e | ./clevis-pin-sss decrypt
+

@@ -71,7 +71,15 @@ encrypt(int argc, char *argv[])
     size_t ptl = 0;
     int r = 0;
 
-    const struct body send = { sizeof(ky), "application/octet-string", ky };
+    struct http_msg *rep = NULL;
+    const struct http_msg req = {
+        .head = (struct http_head[]) {
+            { "Content-Type", "application/octet-stream" },
+            {}
+        },
+        .body = ky,
+        .size = sizeof(ky)
+    };
 
     pt = readall(stdin, &ptl);
     if (!pt)
@@ -103,7 +111,7 @@ encrypt(int argc, char *argv[])
     if (!jose_b64_decode_json_buf(json_object_get(cek, "k"), ky))
         goto egress;
 
-    r = http(url, HTTP_PUT, NULL, &send, NULL);
+    r = http(url, HTTP_PUT, &req, &rep);
     if (r != 200)
         goto egress;
 
@@ -113,6 +121,7 @@ encrypt(int argc, char *argv[])
 
 egress:
     memset(pt, 0, ptl);
+    http_msg_free(rep);
     json_decref(cfg);
     json_decref(cek);
     json_decref(jwe);
@@ -131,8 +140,13 @@ decrypt(int argc, char *argv[])
     size_t ptl = 0;
     int r = 0;
 
-    struct header headers[] = {{"Accept", "application/octet-string"}, {}};
-    struct body recv = {};
+    struct http_msg *rep = NULL;
+    const struct http_msg req = {
+        .head = (struct http_head[]) {
+            { "Accept", "application/octet-stream" },
+            {}
+        },
+    };
 
     jwe = json_loadf(stdin, 0, NULL);
     if (!jwe)
@@ -141,18 +155,23 @@ decrypt(int argc, char *argv[])
     if (json_unpack(jwe, "{s:{s:s}}", "unprotected", "url", &url) != 0)
         goto egress;
 
-    r = http(url, HTTP_GET, headers, NULL, &recv);
+    r = http(url, HTTP_GET, &req, &rep);
     if (r != 200)
         goto egress;
 
-    if (!recv.body || recv.size != 32)
+    if (!rep->body || rep->size != 32)
         goto egress;
 
-    if (strcasecmp(recv.type, "application/octet-string") != 0)
-        goto egress;
+    for (size_t i = 0; rep->head && rep->head[i].key && rep->head[i].val; i++) {
+        if (strcasecmp(rep->head[i].key, "Content-Type") != 0)
+            continue;
 
-    cek = json_pack("{s:s,s:i}", "kty", "oct", "bytes",
-                    jose_b64_encode_json(recv.body, recv.size));
+        if (strcasecmp(rep->head[i].val, "application/octet-stream") != 0)
+            goto egress;
+    }
+
+    cek = json_pack("{s:s,s:o}", "kty", "oct", "k",
+                    jose_b64_encode_json(rep->body, rep->size));
     if (!cek)
         goto egress;
 
@@ -165,6 +184,7 @@ decrypt(int argc, char *argv[])
 
 egress:
     memset(pt, 0, ptl);
+    http_msg_free(rep);
     json_decref(cek);
     json_decref(jwe);
     free(pt);

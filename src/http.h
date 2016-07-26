@@ -21,17 +21,20 @@
 
 #include <http_parser.h>
 
-struct header {
-    const char *key;
-    const char *val;
+struct http_head {
+    char *key;
+    char *val;
 };
 
-struct body {
-    size_t   size;
-    char    *type;
-    uint8_t *body;
+struct http_msg {
+    struct http_head *head;
+    uint8_t          *body;
+    size_t            size;
 };
+
+void
+http_msg_free(struct http_msg *msg);
 
 int
-http(const char *url, enum http_method m, const struct header headers[],
-     const struct body *in, struct body *out);
+http(const char *url, enum http_method m,
+     const struct http_msg *req, struct http_msg **rep);
