@@ -10,12 +10,12 @@ TESTS = \
     tests/clevis-pin-sss \
     tests/clevis-pin-http
 
-clevis_pin_sss_SOURCES = src/clevis-pin-sss.c src/sss.c src/sss.h
+clevis_pin_sss_SOURCES = pins/clevis-pin-sss.c pins/sss.c pins/sss.h
 
-clevis_pin_http_SOURCES = src/clevis-pin-http.c src/http.c src/http.h
+clevis_pin_http_SOURCES = pins/clevis-pin-http.c pins/http.c pins/http.h
 clevis_pin_http_LDADD = -lhttp_parser $(LIBS)
 
-clevis_pin_tang_SOURCES = src/clevis-pin-tang.c src/http.c src/http.h src/tang.c src/tang.h
+clevis_pin_tang_SOURCES = pins/clevis-pin-tang.c pins/http.c pins/http.h pins/tang.c pins/tang.h
 clevis_pin_tang_LDADD = -lhttp_parser $(LIBS)
 
-clevis_pin_test_SOURCES = src/clevis-pin-test.c
+clevis_pin_test_SOURCES = pins/clevis-pin-test.c
