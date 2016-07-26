@@ -1,10 +1,10 @@
 AM_CFLAGS = @CLEVIS_CFLAGS@ @jose_CFLAGS@ @curl_CFLAGS@
 LIBS = @jose_LIBS@
 
-#bin_PROGRAMS = clevis
+bin_PROGRAMS = clevis-pin-sss clevis-pin-http
+check_PROGRAMS = clevis-pin-test
 
-pindir = @CLEVIS_PINDIR@
-pin_PROGRAMS = sss http
+clevis_pin_sss_SOURCES = clevis-pin-sss.c sss.c
 
-sss_SOURCES = sss_alg.c sss_alg.h sss.c
-http_LDADD = @curl_LIBS@
+clevis_pin_http_SOURCES = clevis-pin-http.c http.c
+clevis_pin_http_LDADD = -lhttp_parser $(LIBS)

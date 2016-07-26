@@ -28,4 +28,4 @@ uint8_t *
 sss_point(const json_t *sss, size_t *len);
 
 json_t *
-sss_recover(const json_t *p, const json_t *points);
+sss_recover(const json_t *p, size_t npnts, const uint8_t *pnts[]);

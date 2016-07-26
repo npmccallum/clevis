@@ -17,223 +17,291 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "sss_alg.h"
+#include "sss.h"
+#include <jose/b64.h>
+#include <openssl/bn.h>
 
-#include <sys/types.h>
-#include <sys/wait.h>
-
-#include <errno.h>
-#include <unistd.h>
-#include <signal.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-enum {
-    PIPE_RD = 0,
-    PIPE_WR = 1
-};
+#define BIGNUM_auto __attribute__((cleanup(BN_cleanup))) BIGNUM
+#define BN_CTX_auto __attribute__((cleanup(BN_CTX_cleanup))) BN_CTX
 
-static uint8_t *
-readall(FILE *file, size_t *len)
+static void
+clear_free(void *mem, size_t len)
 {
-    uint8_t *out = NULL;
+    if (!mem)
+        return;
 
-    *len = 0;
-
-    while (true) {
-        uint8_t *tmp = NULL;
-        size_t r = 0;
-
-        tmp = realloc(out, *len + 16);
-        if (!tmp)
-            break;
-        out = tmp;
-
-        r = fread(&out[*len], 1, 16, file);
-        *len += r;
-        if (r < 16) {
-            if (ferror(file) || *len == 0)
-                break;
-            if (feof(file))
-                return out;
-        }
-    }
-
-    if (out)
-        memset(out, 0, *len);
-
-    free(out);
-    return NULL;
+    memset(mem, 0, len);
+    free(mem);
 }
 
-static FILE *
-call(char *const argv[], void *buf, size_t len, pid_t *pid)
+static BIGNUM *
+bn_decode(const uint8_t buf[], size_t len)
 {
-    int dump[2] = { -1, -1 };
-    int load[2] = { -1, -1 };
-    FILE *out = NULL;
-    ssize_t wr = 0;
+    return BN_bin2bn(buf, len, NULL);
+}
 
-    *pid = 0;
+static BIGNUM *
+bn_decode_json(const json_t *json)
+{
+    uint8_t *buf = NULL;
+    BIGNUM *bn = NULL;
+    size_t len = 0;
 
-    if (pipe(dump) < 0)
-        goto error;
+    buf = jose_b64_decode_json(json, &len);
+    if (!buf)
+        return NULL;
 
-    if (pipe(load) < 0)
-        goto error;
+    bn = bn_decode(buf, len);
 
-    *pid = fork();
-    if (*pid < 0)
-        goto error;
+    clear_free(buf, len);
+    return bn;
+}
 
-    if (*pid == 0) {
-        if (dup2(dump[PIPE_RD], STDIN_FILENO) < 0 ||
-            dup2(load[PIPE_WR], STDOUT_FILENO) < 0)
-            exit(EXIT_FAILURE);
+static bool
+bn_encode(const BIGNUM *bn, uint8_t buf[], size_t len)
+{
+    int bytes = 0;
 
-        if (close(dump[PIPE_RD]) < 0 ||
-            close(dump[PIPE_WR]) < 0 ||
-            close(load[PIPE_RD]) < 0 ||
-            close(load[PIPE_WR]) < 0)
-            exit(EXIT_FAILURE);
+    if (!bn)
+        return false;
 
-        execv(argv[0], argv);
-        exit(EXIT_FAILURE);
+    if (len == 0)
+        len = BN_num_bytes(bn);
+
+    bytes = BN_num_bytes(bn);
+    if (bytes < 0 || bytes > (int) len)
+        return false;
+
+    memset(buf, 0, len);
+    return BN_bn2bin(bn, &buf[len - bytes]) > 0;
+}
+
+static json_t *
+bn_encode_json(const BIGNUM *bn, size_t len)
+{
+    uint8_t *buf = NULL;
+    json_t *out = NULL;
+
+    if (!bn)
+        return false;
+
+    if (len == 0)
+        len = BN_num_bytes(bn);
+
+    if ((int) len < BN_num_bytes(bn))
+        return false;
+
+    buf = malloc(len);
+    if (buf) {
+        if (bn_encode(bn, buf, len))
+            out = jose_b64_encode_json(buf, len);
+
+        clear_free(buf, len);
     }
 
-    for (uint8_t *tmp = buf; len > 0; tmp += wr, len -= wr) {
-        wr = write(dump[PIPE_WR], tmp, len);
-        if (wr < 0)
+    return out;
+}
+
+static void
+BN_CTX_cleanup(BN_CTX **ctx)
+{
+    if (ctx)
+        BN_CTX_free(*ctx);
+}
+
+static void
+BN_cleanup(BIGNUM **bnp)
+{
+    if (bnp)
+        BN_clear_free(*bnp);
+}
+
+json_t *
+sss_generate(size_t key_bytes, size_t threshold)
+{
+    BIGNUM_auto *p = NULL;
+    BIGNUM_auto *e = NULL;
+    json_t *sss = NULL;
+
+    if (key_bytes == 0 || threshold < 1)
+        return NULL;
+
+    p = BN_new();
+    e = BN_new();
+    if (!p || !e)
+        goto error;
+
+    if (!BN_generate_prime(p, key_bytes * 8, 1, NULL, NULL, NULL, NULL))
+        goto error;
+
+    sss = json_pack("{s:i,s:[],s:o}", "t", threshold, "e", "p",
+                    bn_encode_json(p, key_bytes));
+    if (!sss)
+        goto error;
+
+    for (size_t i = 0; i < threshold; i++) {
+        if (BN_rand_range(e, p) <= 0)
+            goto error;
+
+        if (json_array_append_new(json_object_get(sss, "e"),
+                                  bn_encode_json(e, key_bytes)))
             goto error;
     }
 
-    out = fdopen(load[PIPE_RD], "r");
-    if (!out)
-        goto error;
-
-    close(dump[PIPE_RD]);
-    close(dump[PIPE_WR]);
-    close(load[PIPE_WR]);
-    return out;
+    return sss;
 
 error:
-    close(dump[PIPE_RD]);
-    close(dump[PIPE_WR]);
-    close(load[PIPE_RD]);
-    close(load[PIPE_WR]);
-
-    if (*pid > 0) {
-        kill(*pid, SIGTERM);
-        waitpid(*pid, NULL, 0);
-        *pid = 0;
-    }
-
+    json_decref(sss);
     return NULL;
 }
 
-static int
-encrypt(int argc, char *argv[])
+uint8_t *
+sss_point(const json_t *sss, size_t *len)
 {
-    const char *key = NULL;
-    json_t *pins = NULL;
-    json_t *cfg = NULL;
-    json_t *sss = NULL;
-    json_t *val = NULL;
-    uint8_t *in = NULL;
-    json_int_t t = 1;
-    size_t inl = 0;
+    BN_CTX_auto *ctx = NULL;
+    BIGNUM_auto *tmp = NULL;
+    BIGNUM_auto *xx = NULL;
+    BIGNUM_auto *yy = NULL;
+    BIGNUM_auto *pp = NULL;
+    uint8_t *key = NULL;
+    json_t *e = NULL;
+    json_t *p = NULL;
+    json_int_t t = 0;
 
-    in = readall(stdin, &inl);
-    if (!in) {
-        fprintf(stderr, "Error reading input!\n");
-        return EXIT_FAILURE;
+    if (json_unpack((json_t *) sss, "{s:I,s:o,s:o}",
+                    "t", &t, "p", &p, "e", &e) != 0)
+        return NULL;
+
+    ctx = BN_CTX_new();
+    pp = bn_decode_json(p);
+    xx = BN_new();
+    yy = BN_new();
+    tmp = BN_new();
+    if (!ctx || !pp || !xx || !yy || !tmp)
+        return NULL;
+
+    if (BN_rand_range(xx, pp) <= 0)
+        return NULL;
+
+    if (BN_zero(yy) <= 0)
+        return NULL;
+
+    for (size_t i = 0; i < json_array_size(e); i++) {
+        BIGNUM_auto *ee = NULL;
+
+        ee = bn_decode_json(json_array_get(e, i));
+        if (!ee)
+            return NULL;
+
+        if (BN_cmp(pp, ee) <= 0)
+            return NULL;
+
+        /* y += e[i] * x^i */
+
+        if (BN_set_word(tmp, i) <= 0)
+            return NULL;
+
+        if (BN_mod_exp(tmp, xx, tmp, pp, ctx) <= 0)
+            return NULL;
+
+        if (BN_mod_mul(tmp, ee, tmp, pp, ctx) <= 0)
+            return NULL;
+
+        if (BN_mod_add(yy, yy, tmp, pp, ctx) <= 0)
+            return NULL;
     }
 
-    cfg = json_loads(argv[2], 0, NULL);
-    if (!cfg) {
-        fprintf(stderr, "Error parsing config!\n");
-        goto egress;
+    *len = jose_b64_dlen(json_string_length(p));
+    key = malloc(*len * 2);
+    if (!key)
+        return NULL;
+
+    if (!bn_encode(xx, key, *len) || !bn_encode(yy, &key[*len], *len)) {
+        memset(key, 0, *len * 2);
+        free(key);
+        return NULL;
     }
 
-    if (json_unpack(cfg, "{s?I,s:o}", "t", &t, "pins", &pins) != 0) {
-        fprintf(stderr, "Config missing 'pins' attribute!\n");
-        goto egress;
-    }
+    *len *= 2;
+    return key;
+}
 
-    if (t < 1 || t > (json_int_t) json_object_size(pins)) {
-        fprintf(stderr, "Invalid threshold (required: 1 <= %lld <= %zu)!\n",
-                t, json_object_size(pins));
-        goto egress;
-    }
+json_t *
+sss_recover(const json_t *p, size_t npnts, const uint8_t *pnts[])
+{
+    BN_CTX_auto *ctx = BN_CTX_new();
+    BIGNUM_auto *pp = bn_decode_json(p);
+    BIGNUM_auto *acc = BN_new();
+    BIGNUM_auto *tmp = BN_new();
+    BIGNUM_auto *k = BN_new();
+    size_t len = 0;
 
-    sss = sss_generate(32, t);
-    if (!sss) {
-        fprintf(stderr, "Generating SSS!\n");
-        goto egress;
-    }
+    if (!ctx || !pp || !acc || !tmp || !k)
+        return NULL;
 
-    /*
-    json_object_foreach(pins, key, val) {
-        json_t *pin = NULL;
-        size_t i = 0;
+    if (BN_zero(k) <= 0)
+        return NULL;
 
-        if (json_is_object(val))
-            val = json_pack("[O]", val);
-        else if (json_is_array(val))
-            val = json_incref(val);
-        else
-            goto egress;
+    len = jose_b64_dlen(json_string_length(p));
+    if (len == 0)
+        return NULL;
 
-        json_array_foreach(val, i, pin) {
-            char *args[] = { (char *) key, "encrypt", NULL, NULL };
-            uint8_t *pnt = NULL;
-            json_t *jwe = NULL;
-            FILE *pipe = NULL;
-            size_t pntl = 0;
-            pid_t pid = 0;
+    for (size_t i = 0; i < npnts; i++) {
+        BIGNUM_auto *xo = NULL; /* Outer X */
+        BIGNUM_auto *yo = NULL; /* Outer Y */
 
-            argv[2] = json_dumps(pin, JSON_SORT_KEYS | JSON_COMPACT);
-            if (!argv[2])
-                goto egress;
+        xo = bn_decode(pnts[i], len);
+        yo = bn_decode(&pnts[i][len], len);
+        if (!xo || !yo)
+            return NULL;
 
-            pnt = sss_point(sss, &pntl);
-            if (!pnt)
-                goto egress;
+        if (BN_one(acc) <= 0)
+            return NULL;
 
-            pipe = call(args, pnt, pntl, &pid);
-            if (pipe < 0)
-                goto egress;
+        for (size_t j = 0; j < npnts; j++) {
+            BIGNUM_auto *xi = NULL; /* Inner X */
 
-            jwe = json_loadf(pipe, 0, NULL);
-            fclose(pipe);
-            waitpid(pid, NULL, 0);
-            if (!jwe)
-                goto egress;
+            if (i == j)
+                continue;
 
-            if (json_array_append(json_object_get(sss, "pins"), jwe)
+            xi = bn_decode(pnts[j], len);
+            if (!xi)
+                return NULL;
+
+            /* acc *= (0 - xi) / (xo - xi) */
+
+            if (BN_zero(tmp) <= 0)
+                return NULL;
+
+            if (BN_mod_sub(tmp, tmp, xi, pp, ctx) <= 0)
+                return NULL;
+
+            if (BN_mod_mul(acc, acc, tmp, pp, ctx) <= 0)
+                return NULL;
+
+            if (BN_mod_sub(tmp, xo, xi, pp, ctx) <= 0)
+                return NULL;
+
+            if (BN_mod_inverse(tmp, tmp, pp, ctx) != tmp)
+                return NULL;
+
+            if (BN_mod_mul(acc, acc, tmp, pp, ctx) <= 0)
+                return NULL;
         }
 
-    }*/
+        /* k += acc * y[i] */
 
-    jwk = json_pack(
-}
+        if (BN_mod_mul(acc, acc, yo, pp, ctx) <= 0)
+            return NULL;
 
-static int
-decrypt(int argc, char *argv[])
-{
-}
+        if (BN_mod_add(k, k, acc, pp, ctx) <= 0)
+            return NULL;
+    }
 
-int
-main(int argc, char *argv[])
-{
-    if (argc == 3 && strcmp(argv[1], "encrypt") == 0)
-        return encrypt(argc, argv);
-
-    if (argc == 2 && strcmp(argv[1], "decrypt") == 0)
-        return decrypt(argc, argv);
-
-    fprintf(stderr, "Usage: %s encrypt CONFIG\n", argv[0]);
-    fprintf(stderr, "   or: %s decrypt\n", argv[0]);
-    return EXIT_FAILURE;
+    return bn_encode_json(k, len);
 }
