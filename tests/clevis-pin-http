@@ -6,7 +6,7 @@ PORT=`shuf -i 1024-65535 -n 1`
 
 python tests/httpd.py $PORT &
 export PID=$!
-sleep 0.25
+sleep 1
 
 function onerr() {
     kill -9 $PID
