@@ -87,10 +87,13 @@ encrypt(int argc, char *argv[])
         goto egress;
     }
 
-    jwe = json_pack("{s:{s:s},s:{s:O}}",
-                    "protected", "alg", "dir",
+    jwe = json_pack("{s:{s:s,s:s},s:{s{s:O}}}",
+                    "protected",
+                        "alg", "dir",
+                        "clevis.pin", "test",
                     "unprotected",
-                        "fail", json_object_get(cfg, "fail"));
+                        "clevis.pin.test",
+                            "fail", json_object_get(cfg, "fail"));
     if (!jwe) {
         fprintf(stderr, "Error making JWE!\n");
         goto egress;
@@ -128,8 +131,8 @@ decrypt(int argc, char *argv[])
     if (!jwe)
         goto egress;
 
-    if (json_unpack(jwe, "{s:{s:b}}",
-                    "unprotected", "fail", &fail) < 0 || fail)
+    if (json_unpack(jwe, "{s:{s:{s:b}}}", "unprotected", "clevis.pin.test",
+                    "fail", &fail) < 0 || fail)
         goto egress;
 
     cek = json_pack("{s:s,s:s}", "kty", "oct", "k", key);

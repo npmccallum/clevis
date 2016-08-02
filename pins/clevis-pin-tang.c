@@ -279,11 +279,12 @@ encrypt(int argc, char *argv[])
         goto egress;
     }
 
-    jwe = json_pack("{s:{s:s},s:{s:{s:s,s:O,s:O}}}",
+    jwe = json_pack("{s:{s:s,s:s},s:{s:{s:s,s:O,s:O}}}",
                     "protected",
                         "alg", "dir",
+                        "clevis.pin", "tang",
                     "unprotected",
-                        "tang",
+                        "clevis.pin.tang",
                             "url", url,
                             "ste", ste,
                             "adv", jws);
@@ -333,8 +334,8 @@ decrypt(int argc, char *argv[])
     if (!jwe)
         goto egress;
 
-    if (json_unpack(jwe, "{s:{s:{s:s,s:o}}}",
-                    "unprotected", "tang", "url", &url, "ste", &ste) != 0)
+    if (json_unpack(jwe, "{s:{s:{s:s,s:o}}}", "unprotected", "clevis.pin.tang",
+                    "url", &url, "ste", &ste) != 0)
         goto egress;
 
     req = rec_req(ste);

@@ -99,9 +99,12 @@ encrypt(int argc, char *argv[])
     if (!jose_jwk_generate(cek))
         goto egress;
 
-    jwe = json_pack("{s:{s:s},s:{s:s}}",
-                    "protected", "alg", "dir",
-                    "unprotected", "url", url);
+    jwe = json_pack("{s:{s:s,s:s},s:{s:{s:s}}}",
+                    "protected",
+                        "alg", "dir",
+                        "clevis.pin", "http",
+                    "unprotected",
+                        "clevis.pin.http", "url", url);
     if (!jwe)
         goto egress;
 
@@ -152,7 +155,8 @@ decrypt(int argc, char *argv[])
     if (!jwe)
         goto egress;
 
-    if (json_unpack(jwe, "{s:{s:s}}", "unprotected", "url", &url) != 0)
+    if (json_unpack(jwe, "{s:{s:{s:s}}}", "unprotected", "clevis.pin.http",
+                    "url", &url) != 0)
         goto egress;
 
     r = http(url, HTTP_GET, &req, &rep);

@@ -294,9 +294,12 @@ cmd_encrypt(int argc, char *argv[])
     if (json_object_del(sss, "e") != 0)
         goto egress;
 
-    jwe = json_pack("{s:{s:s},s:{s:O}}",
-                    "protected", "alg", "dir",
-                    "unprotected", "sss", sss);
+    jwe = json_pack("{s:{s:s,s:s},s:{s:O}}",
+                    "protected",
+                        "alg", "dir",
+                        "clevis.pin", "sss",
+                    "unprotected",
+                        "clevis.pin.sss", sss);
     if (!jwe)
         goto egress;
 
@@ -362,7 +365,7 @@ cmd_decrypt(int argc, char *argv[])
         goto egress;
 
     if (json_unpack(jwe, "{s:{s:{s:I,s:o,s:O}}}", "unprotected",
-                    "sss", "t", &t, "p", &p, "pins", &pins) != 0)
+                    "clevis.pin.sss", "t", &t, "p", &p, "pins", &pins) != 0)
         goto egress;
 
     pl = jose_b64_dlen(json_string_length(p));
