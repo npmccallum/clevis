@@ -17,576 +17,582 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "tang.h"
+#include "libtang.h"
+#include "libhttp.h"
+
 #include <jose/b64.h>
 #include <jose/jwk.h>
-#include <jose/jws.h>
 #include <jose/jwe.h>
-#include <jose/openssl.h>
-
-#include <openssl/rand.h>
 
 #include <string.h>
+#include <time.h>
 
-static json_t *
-anon(const json_t *jwk, json_t *jwkt, size_t bytes)
+#include <errno.h>
+
+static int
+http_json(const char *url, const char *sfx, enum http_method method,
+          char *type, const json_t *req, char *accept, json_t **rep)
 {
-    const int iter = 1000;
-    json_t *state = NULL;
-    json_t *req = NULL;
-    EC_POINT *k = NULL;
-    BN_CTX *ctx = NULL;
-    EC_KEY *lcl = NULL;
-    EC_KEY *rem = NULL;
-    char *pass = NULL;
-    uint8_t ky[bytes];
-    uint8_t st[bytes];
+    struct http_msg hreq = {
+        .head = (struct http_head[]) {
+            { "Accept", accept },
+            { type ? "Content-Type" : NULL, type ? type : NULL },
+            {}
+        },
+    };
 
-    rem = jose_openssl_jwk_to_EC_KEY(jwk);
-    if (!rem)
-        goto egress;
+    struct http_msg *hrep = NULL;
+    char full[8192] = {};
+    int r = 0;
 
-    lcl = EC_KEY_new();
-    if (!lcl)
-        goto egress;
+    if (snprintf(full, sizeof(full), "%s/%s", url, sfx) > (int) sizeof(full))
+        return -E2BIG;
 
-    if (EC_KEY_set_group(lcl, EC_KEY_get0_group(rem)) <= 0)
-        goto egress;
+    if (req) {
+        hreq.body = (uint8_t *) json_dumps(req, JSON_SORT_KEYS | JSON_COMPACT);
+        if (!hreq.body)
+            return -ENOMEM;
 
-    if (EC_KEY_generate_key(lcl) <= 0)
-        goto egress;
-
-    k = EC_POINT_new(EC_KEY_get0_group(rem));
-    if (!k)
-        goto egress;
-
-    ctx = BN_CTX_new();
-    if (!ctx)
-        goto egress;
-
-    if (EC_POINT_mul(EC_KEY_get0_group(rem), k, NULL,
-                     EC_KEY_get0_public_key(rem),
-                     EC_KEY_get0_private_key(lcl), ctx) <= 0)
-        goto egress;
-
-    if (RAND_bytes(st, sizeof(st)) <= 0)
-        goto egress;
-
-    pass = EC_POINT_point2hex(EC_KEY_get0_group(lcl), k,
-                              POINT_CONVERSION_COMPRESSED, ctx);
-    if (!pass)
-        goto egress;
-
-    if (PKCS5_PBKDF2_HMAC(pass, strlen(pass), st, bytes, iter,
-                          EVP_sha256(), bytes, ky) <= 0)
-        goto egress;
-
-    req = jose_openssl_jwk_from_EC_POINT(EC_KEY_get0_group(lcl),
-                                         EC_KEY_get0_public_key(lcl), NULL);
-    if (!req)
-        goto egress;
-
-    if (json_object_set_new(req, "kid",
-                            json_deep_copy(json_object_get(jwk, "kid"))) != 0)
-        goto egress;
-
-    state = json_pack("{s:i,s:s,s:o,s:o,s:o,s:O}",
-                      "iter", iter, "hash", "sha256",
-                      "jwk", json_deep_copy(jwk),
-                      "jwkt", json_deep_copy(jwkt),
-                      "salt", jose_b64_encode_json(st, bytes),
-                      "req", req);
-
-    if (json_object_set_new(jwkt, "k", jose_b64_encode_json(ky, bytes)) != 0) {
-        json_decref(state);
-        state = NULL;
+        hreq.size = strlen((char *) hreq.body);
     }
 
-egress:
-    memset(ky, 0, sizeof(ky));
-    memset(st, 0, sizeof(st));
-    OPENSSL_free(pass);
-    EC_POINT_free(k);
-    BN_CTX_free(ctx);
-    EC_KEY_free(lcl);
-    EC_KEY_free(rem);
-    json_decref(req);
-    return state;
+    r = http(full, method, &hreq, &hrep);
+    if (hreq.body)
+        memset(hreq.body, 0, hreq.size);
+    free(hreq.body);
+    if (r != 200) {
+        http_msg_free(hrep);
+        return r;
+    }
+
+    if (hrep->head) {
+        for (size_t i = 0; hrep->head[i].key && hrep->head[i].val; i++) {
+            if (strcasecmp("Content-Type", hrep->head[i].val) != 0)
+                continue;
+
+            if (strcasecmp(accept, hrep->head[i].val) != 0) {
+                http_msg_free(hrep);
+                return -EBADMSG;
+            }
+        }
+    }
+
+    *rep = json_loadb((char *) hrep->body, hrep->size, 0, NULL);
+
+    http_msg_free(hrep);
+    return *rep ? 200 : -EBADMSG;
+}
+
+static uint8_t *
+readkey(FILE *file, size_t *len)
+{
+    uint8_t *out = NULL;
+
+    *len = 0;
+
+    while (true) {
+        uint8_t *tmp = NULL;
+        size_t r = 0;
+
+        tmp = realloc(out, *len + 16);
+        if (!tmp)
+            break;
+        out = tmp;
+
+        r = fread(&out[*len], 1, 16, file);
+        *len += r;
+        if (r < 16) {
+            if (ferror(file) || *len == 0)
+                break;
+            if (feof(file))
+                return out;
+        }
+    }
+
+    if (out)
+        memset(out, 0, *len);
+
+    free(out);
+    return NULL;
 }
 
 static json_t *
-wrap(const json_t *jwk, json_t *jwkt, size_t bytes)
+load_adv(const char *filename)
 {
-    uint8_t ky[bytes * 3];
-    json_t *state = NULL;
-    json_t *jwe = NULL;
-    json_t *cek = NULL;
-    json_t *pt = NULL;
+    json_t *keys = NULL;
+    json_t *adv = NULL;
+    FILE *file = NULL;
 
-    if (RAND_bytes(ky, sizeof(ky)) <= 0)
-        return false;
+    file = fopen(filename, "r");
+    if (!file)
+        return NULL;
 
-    if (json_object_set_new(jwkt, "k", jose_b64_encode_json(ky, bytes)) != 0)
+    adv = json_loadf(file, 0, NULL);
+    fclose(file);
+
+    keys = adv_vld(adv);
+    json_decref(keys);
+    if (!keys) {
+        json_decref(adv);
+        return NULL;
+    }
+
+    return adv;
+}
+
+static json_t *
+dnld_adv(const char *url)
+{
+    json_t *keys = NULL;
+    json_t *adv = NULL;
+    json_t *jwk = NULL;
+    FILE *tty = NULL;
+    char yn = 'x';
+    size_t i = 0;
+    int r = 0;
+
+    r = http_json(url, "adv", HTTP_GET, NULL, NULL,
+                  "application/jose+json", &adv);
+    if (r != 200)
+        return NULL;
+
+    keys = adv_vld(adv);
+    if (!keys)
         goto egress;
 
-    for (size_t i = 0; i < bytes; i++)
-        ky[i] ^= ky[bytes + i];
-
-    pt = json_pack("{s:o,s:o}", "key", jose_b64_encode_json(ky, bytes),
-                   "bid", jose_b64_encode_json(&ky[bytes * 2], bytes));
-    if (!pt)
+    tty = fopen("/dev/tty", "a+");
+    if (!tty)
         goto egress;
 
-    jwe = json_pack("{s:{s:o}}", "protected",
-                    "kid", json_deep_copy(json_object_get(jwk, "kid")));
-    cek = json_object();
-    if (!jwe || !cek)
-        goto egress;
+    fprintf(tty, "The advertisement is signed with the following keys:\n");
 
-    if (!jose_jwe_wrap(jwe, cek, jwk, NULL))
-        goto egress;
+    json_array_foreach(keys, i, jwk) {
+        if (!jose_jwk_allowed(jwk, true, NULL, "tang.derive") &&
+            !jose_jwk_allowed(jwk, true, NULL, "wrapKey"))
+            continue;
 
-    if (!jose_jwe_encrypt_json(jwe, cek, pt))
-        goto egress;
+        fprintf(tty, "\t%s\n", json_string_value(json_object_get(jwk, "kid")));
+    }
 
-    state = json_pack("{s:O,s:o,s:o,s:O,s:o}",
-                      "jwe", jwe,
-                      "jwk", json_deep_copy(jwk),
-                      "jwkt", json_deep_copy(jwkt),
-                      "bid", json_object_get(pt, "bid"),
-                      "otp", jose_b64_encode_json(&ky[bytes], bytes));
-
-    if (json_object_del(json_object_get(state, "jwkt"), "k") != 0) {
-        json_decref(state);
-        state = NULL;
+    while (!strchr("YyNn", yn)) {
+        fprintf(tty, "\nDo you wish to trust the advertisement? [yN] ");
+        if (fread(&yn, 1, 1, tty) != 1)
+            break;
     }
 
 egress:
-    memset(ky, 0, sizeof(ky));
-    json_decref(jwe);
-    json_decref(cek);
-    json_decref(pt);
-    return state;
+    json_decref(keys);
+
+    if(tty)
+        fclose(tty);
+
+    if (strchr("Yy", yn))
+        return adv;
+
+    json_decref(adv);
+    return NULL;
 }
 
-json_t *
-adv_vld(const json_t *jws)
+static json_t *
+select_jwk(json_t *jws)
 {
     json_t *jwkset = NULL;
-    json_t *keys = NULL;
-    size_t sigs = 0;
+    json_t *jwk = NULL;
+    size_t i = 0;
 
     jwkset = jose_b64_decode_json_load(json_object_get(jws, "payload"));
     if (!jwkset)
         return NULL;
 
-    keys = json_object_get(jwkset, "keys");
-    if (!json_is_array(keys))
-        goto error;
-
-    for (size_t i = 0; i < json_array_size(keys); i++) {
-        json_t *key = json_array_get(keys, i);
-        const char *kid = NULL;
-        char *thp = NULL;
-        bool eq = false;
-
-        if (json_unpack(key, "{s:s}", "kid", &kid) != 0)
-            goto error;
-
-        thp = jose_jwk_thumbprint(key, "sha256");
-        if (!thp)
-            goto error;
-
-        eq = strcmp(thp, kid) == 0;
-        free(thp);
-        if (!eq)
-            goto error;
-
-        if (!jose_jwk_allowed(key, true, NULL, "verify"))
-            continue;
-
-        if (!jose_jws_verify(jws, key))
-            goto error;
-
-        sigs++;
+    json_array_foreach(json_object_get(jwkset, "keys"), i, jwk) {
+        if (jose_jwk_allowed(jwk, true, NULL, "tang.derive") ||
+            jose_jwk_allowed(jwk, true, NULL, "wrapKey")) {
+            jwk = json_incref(jwk);
+            json_decref(jwkset);
+            return jwk;
+        }
     }
 
-    if (sigs == 0)
-        goto error;
-
-    keys = json_incref(keys);
-    json_decref(jwkset);
-    return keys;
-
-error:
     json_decref(jwkset);
     return NULL;
 }
 
-json_t *
-adv_rep(const json_t *jwk, json_t *jwkt)
+static int
+encrypt(int argc, char *argv[])
 {
-    const char *kty = NULL;
-    int bytes = 0;
-
-    if (json_unpack(jwkt, "{s:s,s:i}", "kty", &kty, "bytes", &bytes))
-        return NULL;
-
-    if (strcmp(kty, "oct") != 0 || bytes <= 0)
-        return NULL;
-
-    if (json_object_del(jwkt, "bytes") < 0)
-        return NULL;
-
-    if (jose_jwk_allowed(jwk, true, NULL, "tang.derive"))
-        return anon(jwk, jwkt, bytes);
-
-    if (jose_jwk_allowed(jwk, true, NULL, "wrapKey"))
-        return wrap(jwk, jwkt, bytes);
-
-    return NULL;
-}
-
-static void __attribute__((constructor))
-constructor(void)
-{
-    static jose_jwk_op_t tang = {
-        .pub = "tang.derive",
-        .prv = "tang.recover",
-        .use = "tang"
-    };
-
-    jose_jwk_register_op(&tang);
-}
-
-static json_t *
-req_anon(json_t *state)
-{
-    EC_POINT *p = NULL;
-    BN_CTX *ctx = NULL;
-    EC_KEY *eph = NULL;
-    EC_KEY *key = NULL;
+    int ret = EXIT_FAILURE;
+    const char *url = NULL;
+    json_t *jws = NULL;
+    json_t *cfg = NULL;
     json_t *jwk = NULL;
+    json_t *jwe = NULL;
+    json_t *cek = NULL;
+    json_t *ste = NULL;
+    uint8_t *ky = NULL;
+    size_t kyl = 0;
+
+    cfg = json_loads(argv[2], 0, NULL);
+    if (!cfg) {
+        fprintf(stderr, "Error parsing configuration!\n");
+        return EXIT_FAILURE;
+    }
+
+    ky = readkey(stdin, &kyl);
+    if (!ky) {
+        fprintf(stderr, "Error reading key!\n");
+        json_decref(cfg);
+        return EXIT_FAILURE;
+    }
+
+    if (json_unpack(cfg, "{s:s,s?o}", "url", &url, "adv", &jws) != 0) {
+        fprintf(stderr, "Invalid configuration!\n");
+        goto egress;
+    }
+
+    if (json_is_string(jws))
+        jws = load_adv(json_string_value(jws));
+    else if (!json_is_object(jws))
+        jws = dnld_adv(url);
+    else {
+        json_t *keys = adv_vld(jws);
+        if (!keys) {
+            fprintf(stderr, "Specified advertisement is invalid!\n");
+            goto egress;
+        }
+
+        json_decref(keys);
+    }
+
+    jwk = select_jwk(jws);
+    if (!jwk) {
+        fprintf(stderr, "Error selecting remote public key!\n");
+        goto egress;
+    }
+
+    cek = json_pack("{s:s,s:i}", "kty", "oct", "bytes", 32);
+    if (!cek)
+        goto egress;
+
+    ste = adv_rep(jwk, cek);
+    if (!ste) {
+        fprintf(stderr, "Error creating binding!\n");
+        goto egress;
+    }
+
+    jwe = json_pack("{s:{s:s,s:s},s:{s:{s:s,s:O,s:O}}}",
+                    "protected",
+                        "alg", "dir",
+                        "clevis.pin", "tang",
+                    "unprotected",
+                        "clevis.pin.tang",
+                            "url", url,
+                            "ste", ste,
+                            "adv", jws);
+    if (!jwe) {
+        fprintf(stderr, "Error creating JWE template!\n");
+        goto egress;
+    }
+
+    if (!jose_jwe_encrypt(jwe, cek, ky, kyl)) {
+        fprintf(stderr, "Error encrypting key!\n");
+        goto egress;
+    }
+
+    if (json_dumpf(jwe, stdout, JSON_SORT_KEYS | JSON_COMPACT) != 0)
+        goto egress;
+
+    ret = EXIT_SUCCESS;
+
+egress:
+    memset(ky, 0, kyl);
+    json_decref(jws);
+    json_decref(cfg);
+    json_decref(jwk);
+    json_decref(jwe);
+    json_decref(cek);
+    json_decref(ste);
+    free(ky);
+    return ret;
+}
+
+static int
+decrypt(int argc, char *argv[])
+{
+    int ret = EXIT_FAILURE;
+    const char *url = NULL;
+    json_t *ste = NULL;
+    json_t *jwe = NULL;
     json_t *req = NULL;
+    json_t *rep = NULL;
+    json_t *cek = NULL;
+    uint8_t *ky = NULL;
+    char *type = NULL;
+    size_t kyl = 0;
+    int r = 0;
 
-    /* Unpack state values. */
-    if (json_unpack(state, "{s:o}", "req", &jwk) != 0)
-        return NULL;
-
-    key = jose_openssl_jwk_to_EC_KEY(jwk);
-    if (!key)
+    jwe = json_loadf(stdin, 0, NULL);
+    if (!jwe)
         goto egress;
 
-    /* Generate the ephemeral key. */
-    eph = EC_KEY_new();
-    if (!eph)
+    if (json_unpack(jwe, "{s:{s:{s:s,s:o}}}", "unprotected", "clevis.pin.tang",
+                    "url", &url, "ste", &ste) != 0)
         goto egress;
 
-    if (EC_KEY_set_group(eph, EC_KEY_get0_group(key)) <= 0)
-        goto egress;
-
-    if (EC_KEY_generate_key(eph) <= 0)
-        goto egress;
-
-    if (json_object_set_new(state, "eph",
-                            jose_openssl_jwk_from_EC_KEY(eph)) != 0)
-        goto egress;
-
-
-    /* Perform point addition. */
-    ctx = BN_CTX_new();
-    if (!ctx)
-        goto egress;
-
-    p = EC_POINT_new(EC_KEY_get0_group(key));
-    if (!p)
-        goto egress;
-
-    if (EC_POINT_add(EC_KEY_get0_group(key), p,
-                     EC_KEY_get0_public_key(eph),
-                     EC_KEY_get0_public_key(key), ctx) <= 0)
-        goto egress;
-
-    /* Create output request. */
-    req = jose_openssl_jwk_from_EC_POINT(EC_KEY_get0_group(key), p, NULL);
+    req = rec_req(ste);
     if (!req)
         goto egress;
 
-    if (json_object_update_missing(req, jwk) != 0) {
-        json_decref(req);
-        req = NULL;
-    }
+    if (json_object_get(req, "kty"))
+        type = "application/jwk+json";
+    else
+        type = "application/jose+json";
 
-egress:
-    EC_POINT_free(p);
-    EC_KEY_free(eph);
-    EC_KEY_free(key);
-    BN_CTX_free(ctx);
-    return req;
-}
+    r = http_json(url, "rec", HTTP_POST,
+                  type, req, "application/jwk+json", &rep);
+    if (r != 200)
+        goto egress;
 
-static json_t *
-req_wrap(json_t *state)
-{
-    const json_t *jwk = NULL;
-    const json_t *jwe = NULL;
-    uint8_t *otp = NULL;
-    uint8_t *xor = NULL;
-    json_t *cek = NULL;
-    json_t *pt = NULL;
-    json_t *ct = NULL;
-    size_t len = 0;
-
-    otp = jose_b64_decode_json(json_object_get(state, "otp"), &len);
-    if (!otp)
-        return NULL;
-
-    xor = malloc(len);
-    if (!xor) {
-        memset(otp, 0, len);
-        free(otp);
-        return NULL;
-    }
-
-    jwk = json_object_get(state, "jwk");
-    jwe = json_object_get(state, "jwe");
-    if (!jwk || !jwe)
-        goto error;
-
-    if (RAND_bytes(xor, len) <= 0)
-        goto error;
-
-    for (size_t i = 0; i < len; i++)
-        otp[i] ^= xor[i];
-
-    pt = json_pack("{s:O,s:o}", "jwe", jwe,
-                   "otp", jose_b64_encode_json(xor, len));
-    if (!pt)
-        goto error;
-
-    ct = json_pack("{s:{s:O}}", "protected",
-                   "kid", json_object_get(jwk, "kid"));
-    if (!ct)
-        goto error;
-
-    cek = json_object();
+    cek = rec_rep(ste, rep);
     if (!cek)
-        goto error;
+        goto egress;
 
-    if (!jose_jwe_wrap(ct, cek, jwk, NULL))
-        goto error;
-
-    if (!jose_jwe_encrypt_json(ct, cek, pt))
-        goto error;
-
-    if (json_object_set_new(state, "tmp", jose_b64_encode_json(otp, len)) != 0)
-        goto error;
-
-    memset(otp, 0, len);
-    memset(xor, 0, len);
-    json_decref(cek);
-    json_decref(pt);
-    free(otp);
-    free(xor);
-    return ct;
-
-error:
-    memset(otp, 0, len);
-    memset(xor, 0, len);
-    json_decref(cek);
-    json_decref(pt);
-    json_decref(ct);
-    free(otp);
-    free(xor);
-    return NULL;
-}
-
-static json_t *
-kdf(json_t *state, const EC_GROUP *grp, const EC_POINT *p, BN_CTX *ctx)
-{
-    static const struct {
-        const char *name;
-        const EVP_MD *(*md)(void);
-    } table[] = {
-        { "sha256", EVP_sha256 },
-        {}
-    };
-
-    const EVP_MD *md = NULL;
-    const char *salt = NULL;
-    const char *hash = NULL;
-    json_t *out = NULL;
-    uint8_t *ky = NULL;
-    uint8_t *st = NULL;
-    char *pass = NULL;
-    size_t len = 0;
-    int iter = 1;
-
-    if (json_unpack(state, "{s:s,s:s,s:i}",
-                    "hash", &hash, "salt", &salt, "iter", &iter) != 0)
-        return NULL;
-
-    for (size_t i = 0; table[i].name && !md; i++) {
-        if (strcmp(table[i].name, hash) == 0)
-            md = table[i].md();
-    }
-
-    if (!md)
-        return NULL;
-
-    st = jose_b64_decode(salt, &len);
-    if (!st)
-        return NULL;
-
-    ky = malloc(len);
+    ky = jose_jwe_decrypt(jwe, cek, &kyl);
     if (!ky)
         goto egress;
 
-    pass = EC_POINT_point2hex(grp, p, POINT_CONVERSION_COMPRESSED, ctx);
-    if (!pass)
+    if (fwrite(ky, kyl, 1, stdout) != 1)
         goto egress;
 
-    if (PKCS5_PBKDF2_HMAC(pass, strlen(pass), st, len, iter, md, len, ky) <= 0)
-        goto egress;
-
-    out = json_deep_copy(json_object_get(state, "jwkt"));
-    if (out) {
-        if (json_object_set_new(out, "k", jose_b64_encode_json(ky, len)) < 0) {
-            json_decref(out);
-            out = NULL;
-        }
-    }
+    ret = EXIT_SUCCESS;
 
 egress:
-    memset(st, 0, len);
-
     if (ky)
-        memset(ky, 0, len);
-
-    if (pass)
-        memset(pass, 0, strlen(pass));
-
-    OPENSSL_free(pass);
-    free(st);
+        memset(ky, 0, kyl);
+    json_decref(req);
+    json_decref(rep);
+    json_decref(cek);
+    json_decref(jwe);
     free(ky);
+    return ret;
+}
+
+static double
+curtime(void)
+{
+    struct timespec ts = {};
+    double out = 0;
+
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &ts) == 0)
+        out = ((double) ts.tv_sec) + ((double) ts.tv_nsec) / 1000000000L;
+
     return out;
 }
 
-static json_t *
-rep_anon(json_t *state, const json_t *rep)
+static void
+dump_perf(json_t *time)
 {
-    const json_t *tmp = NULL;
-    const json_t *jwk = NULL;
-    EC_POINT *p = NULL;
-    EC_KEY *eph = NULL;
-    EC_KEY *key = NULL;
-    EC_KEY *rpl = NULL;
-    BN_CTX *ctx = NULL;
-    json_t *out = NULL;
+    const char *key = NULL;
+    bool first = true;
+    json_t *val = 0;
 
-    ctx = BN_CTX_new();
-    if (!ctx)
-        goto egress;
+    json_object_foreach(time, key, val) {
+        int v = 0;
 
-    /* Load all the keys required for recovery. */
-    if (json_unpack(state, "{s:o,s:o}", "eph", &tmp, "jwk", &jwk) != 0)
-        goto egress;
+        if (!first)
+            printf(" ");
+        else
+            first = false;
 
-    eph = jose_openssl_jwk_to_EC_KEY(tmp);
-    key = jose_openssl_jwk_to_EC_KEY(jwk);
-    rpl = jose_openssl_jwk_to_EC_KEY(rep);
-    if (!eph || !key || !rpl)
-        goto egress;
+        if (json_is_integer(val))
+            v = json_integer_value(val);
+        else if (json_is_real(val))
+            v = json_real_value(val) * 1000000;
 
-    if (EC_GROUP_cmp(EC_KEY_get0_group(rpl), EC_KEY_get0_group(eph), ctx) != 0)
-        goto egress;
-
-    /* Perform recovery. */
-    p = EC_POINT_new(EC_KEY_get0_group(eph));
-    if (!p)
-        goto egress;
-
-    if (EC_POINT_mul(EC_KEY_get0_group(key), p, NULL,
-                     EC_KEY_get0_public_key(key),
-                     EC_KEY_get0_private_key(eph), ctx) <= 0)
-        goto egress;
-
-    if (EC_POINT_invert(EC_KEY_get0_group(key), p, ctx) <= 0)
-        goto egress;
-
-    if (EC_POINT_add(EC_KEY_get0_group(key), p, p,
-                     EC_KEY_get0_public_key(rpl), ctx) <= 0)
-        goto egress;
-
-    /* Create output key. */
-    out = kdf(state, EC_KEY_get0_group(key), p, ctx);
-
-egress:
-    EC_POINT_free(p);
-    EC_KEY_free(eph);
-    EC_KEY_free(key);
-    EC_KEY_free(rpl);
-    BN_CTX_free(ctx);
-    return out;
+        printf("%s=%d", key, v);
+    }
 }
 
-static json_t *
-rep_wrap(json_t *state, const json_t *rep)
+static bool
+nagios_recover(const char *url, const json_t *jwk,
+               size_t *sig, size_t *rec, json_t *time)
 {
-    uint8_t *otp = NULL;
-    uint8_t *key = NULL;
-    json_t *out = NULL;
-    size_t otpl = 0;
-    size_t keyl = 0;
+    const char *kid = NULL;
+    json_t *state = NULL;
+    json_t *bef = NULL;
+    json_t *aft = NULL;
+    json_t *req = NULL;
+    json_t *rep = NULL;
+    char *type = NULL;
+    bool ret = false;
+    double s = 0;
+    double e = 0;
+    int r = 0;
 
-    otp = jose_b64_decode_json(json_object_get(state, "tmp"), &otpl);
-    if (!otp)
-        return NULL;
-
-    key = jose_b64_decode_json(json_object_get(rep, "k"), &keyl);
-    if (!key) {
-        memset(otp, 0, otpl);
-        free(otp);
-        return NULL;
+    if (jose_jwk_allowed(jwk, true, NULL, "verify")) {
+        *sig += 1;
+        return true;
     }
 
-    if (otpl != keyl)
+    if (!jose_jwk_allowed(jwk, true, NULL, "tang.derive") &&
+        !jose_jwk_allowed(jwk, true, NULL, "wrapKey"))
+        return true;
+
+    bef = json_pack("{s:s,s:i}", "kty", "oct", "bytes", 16);
+    if (!bef) {
+        printf("Error creating JWK template!\n");
         goto egress;
-
-    for (size_t i = 0; i < otpl; i++)
-        key[i] ^= otp[i];
-
-    out = json_deep_copy(json_object_get(state, "jwkt"));
-    if (out) {
-        if (json_object_set_new(out, "k",
-                                jose_b64_encode_json(key, keyl)) < 0) {
-            json_decref(out);
-            out = NULL;
-        }
     }
 
+    state = adv_rep(jwk, bef);
+    if (!state) {
+        printf("Error creating binding!\n");
+        goto egress;
+    }
+
+    req = rec_req(state);
+    if (!req) {
+        printf("Error preparing recovery request!\n");
+        goto egress;
+    }
+
+    if (json_object_get(req, "kty"))
+        type = "application/jwk+json";
+    else
+        type = "application/jose+json";
+
+    s = curtime();
+    r = http_json(url, "rec", HTTP_POST, type, req,
+                  "application/jwk+json", &rep);
+    e = curtime();
+    if (r != 200) {
+        if (r < 0)
+            printf("Error performing recovery! %s\n", strerror(-r));
+        else
+            printf("Error performing recovery! HTTP Status %d\n", r);
+
+        goto egress;
+    }
+
+    if (json_unpack((json_t *) jwk, "{s:s}", "kid", &kid) != 0)
+        goto egress;
+
+    if (s == 0.0 || e == 0.0 ||
+        json_object_set_new(time, kid, json_real(e - s)) < 0) {
+        printf("Error calculating performance metrics!\n");
+        goto egress;
+    }
+
+    aft = rec_rep(state, rep);
+    if (!aft) {
+        printf("Error handing recovery result!\n");
+        goto egress;
+    }
+
+    if (!json_equal(bef, aft)) {
+        printf("Recovered key doesn't match!\n");
+        goto egress;
+    }
+
+    *rec += 1;
+    ret = true;
+
 egress:
-    memset(otp, 0, otpl);
-    memset(key, 0, keyl);
-    free(otp);
-    free(key);
-    return out;
+    json_decref(state);
+    json_decref(bef);
+    json_decref(aft);
+    json_decref(req);
+    json_decref(rep);
+    return ret;
 }
 
-json_t *
-rec_req(json_t *state)
+static int
+nagios(int argc, char *argv[])
 {
-    json_t *out = NULL;
+    enum {
+        NAGIOS_OK = 0,
+        NAGIOS_WARN = 1,
+        NAGIOS_CRIT = 2,
+        NAGIOS_UNKN = 3
+    } ret = NAGIOS_CRIT;
+    json_t *time = NULL;
+    json_t *keys = NULL;
+    json_t *adv = NULL;
+    size_t sig = 0;
+    size_t rec = 0;
+    double s = 0;
+    double e = 0;
+    int r = 0;
 
-    out = req_wrap(state);
-    return out ? out : req_anon(state);
+    time = json_object();
+    if (!time)
+        goto egress;
+
+    s = curtime();
+    r = http_json(argv[2], "adv", HTTP_GET, NULL, NULL,
+                  "application/jose+json", &adv);
+    e = curtime();
+    if (r != 200) {
+        if (r < 0)
+            printf("Error fetching advertisement! %s\n", strerror(-r));
+        else
+            printf("Error fetching advertisement! HTTP Status %d\n", r);
+
+        goto egress;
+    }
+
+    if (s == 0.0 || e == 0.0 ||
+        json_object_set_new(time, "adv", json_real(e - s)) != 0) {
+        printf("Error calculating performance metrics!\n");
+        goto egress;
+    }
+
+    keys = adv_vld(adv);
+    if (!keys) {
+        printf("Error validating advertisement!\n");
+        goto egress;
+    }
+
+    for (size_t i = 0; i < json_array_size(keys); i++) {
+        json_t *jwk = json_array_get(keys, i);
+        if (!nagios_recover(argv[2], jwk, &sig, &rec, time))
+            goto egress;
+    }
+
+    if (rec == 0) {
+        printf("Advertisement contains no recovery keys!\n");
+        goto egress;
+    }
+
+    json_object_set_new(time, "nkeys", json_integer(json_array_size(keys)));
+    json_object_set_new(time, "nsigk", json_integer(sig));
+    json_object_set_new(time, "nreck", json_integer(rec));
+
+    printf("OK|");
+    dump_perf(time);
+    printf("\n");
+    ret = NAGIOS_OK;
+
+egress:
+    json_decref(time);
+    json_decref(keys);
+    json_decref(adv);
+    return ret;
 }
 
-json_t *
-rec_rep(json_t *state, const json_t *rep)
+int
+main(int argc, char *argv[])
 {
-    json_t *jwk = NULL;
+    if (argc == 3 && strcmp(argv[1], "encrypt") == 0)
+        return encrypt(argc, argv);
 
-    jwk = rep_wrap(state, rep);
-    return jwk ? jwk : rep_anon(state, rep);
+    if (argc == 2 && strcmp(argv[1], "decrypt") == 0)
+        return decrypt(argc, argv);
+
+    if (argc == 3 && strcmp(argv[1], "nagios") == 0)
+        return nagios(argc, argv);
+
+    fprintf(stderr, "Usage: %s encrypt CONFIG\n", argv[0]);
+    fprintf(stderr, "   or: %s decrypt\n", argv[0]);
+    fprintf(stderr, "   or: %s nagios  URL\n", argv[0]);
+    return EXIT_FAILURE;
 }

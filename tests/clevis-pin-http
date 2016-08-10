@@ -16,8 +16,8 @@ function onerr() {
 
 trap 'onerr' ERR
 
-e=`echo hi | ./clevis-pin-http encrypt "{\"url\": \"http://localhost:${PORT}/foo\"}"`
-d=`echo $e | ./clevis-pin-http decrypt`
+e=`echo hi | src/encrypt http "{\"url\": \"http://localhost:${PORT}/foo\"}"`
+d=`echo $e | src/decrypt`
 test "$d" == "hi"
 
 kill -9 $PID
@@ -25,4 +25,4 @@ kill -9 $PID
 
 trap 'exit' ERR
 
-! echo $e | ./clevis-pin-http decrypt
+! echo $e | src/decrypt

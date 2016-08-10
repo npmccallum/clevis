@@ -2,31 +2,31 @@
 
 trap 'onerr' ERR
 
-e=`echo hi | ./clevis-pin-sss encrypt '{"t": 1, "pins": {"test": [{"fail": false}, {"fail": false}]}}'`
-d=`echo $e | ./clevis-pin-sss decrypt`
+e=`echo hi | src/encrypt sss '{"t": 1, "pins": {"test": [{"fail": false}, {"fail": false}]}}'`
+d=`echo $e | src/decrypt`
 test "$d" == "hi"
 
-e=`echo hi | ./clevis-pin-sss encrypt '{"t": 1, "pins": {"test": [{"fail": true}, {"fail": false}]}}'`
-d=`echo $e | ./clevis-pin-sss decrypt`
+e=`echo hi | src/encrypt sss '{"t": 1, "pins": {"test": [{"fail": true}, {"fail": false}]}}'`
+d=`echo $e | src/decrypt`
 test "$d" == "hi"
 
-e=`echo hi | ./clevis-pin-sss encrypt '{"t": 1, "pins": {"test": [{"fail": false}, {"fail": true}]}}'`
-d=`echo $e | ./clevis-pin-sss decrypt`
+e=`echo hi | src/encrypt sss '{"t": 1, "pins": {"test": [{"fail": false}, {"fail": true}]}}'`
+d=`echo $e | src/decrypt`
 test "$d" == "hi"
 
-e=`echo hi | ./clevis-pin-sss encrypt '{"t": 1, "pins": {"test": [{"fail": true}, {"fail": true}]}}'`
-! echo $e | ./clevis-pin-sss decrypt
+e=`echo hi | src/encrypt sss '{"t": 1, "pins": {"test": [{"fail": true}, {"fail": true}]}}'`
+! echo $e | src/decrypt
 
-e=`echo hi | ./clevis-pin-sss encrypt '{"t": 2, "pins": {"test": [{"fail": false}, {"fail": false}]}}'`
-d=`echo $e | ./clevis-pin-sss decrypt`
+e=`echo hi | src/encrypt sss '{"t": 2, "pins": {"test": [{"fail": false}, {"fail": false}]}}'`
+d=`echo $e | src/decrypt`
 test "$d" == "hi"
 
-e=`echo hi | ./clevis-pin-sss encrypt '{"t": 2, "pins": {"test": [{"fail": true}, {"fail": false}]}}'`
-! echo $e | ./clevis-pin-sss decrypt
+e=`echo hi | src/encrypt sss '{"t": 2, "pins": {"test": [{"fail": true}, {"fail": false}]}}'`
+! echo $e | src/decrypt
 
-e=`echo hi | ./clevis-pin-sss encrypt '{"t": 2, "pins": {"test": [{"fail": false}, {"fail": true}]}}'`
-! echo $e | ./clevis-pin-sss decrypt
+e=`echo hi | src/encrypt sss '{"t": 2, "pins": {"test": [{"fail": false}, {"fail": true}]}}'`
+! echo $e | src/decrypt
 
-e=`echo hi | ./clevis-pin-sss encrypt '{"t": 2, "pins": {"test": [{"fail": true}, {"fail": true}]}}'`
-! echo $e | ./clevis-pin-sss decrypt
+e=`echo hi | src/encrypt sss '{"t": 2, "pins": {"test": [{"fail": true}, {"fail": true}]}}'`
+! echo $e | src/decrypt
 

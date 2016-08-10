@@ -36,5 +36,11 @@ Makefile.in
 Makefile
 missing
 src/clevis
+src/decrypt
+src/encrypt
+src/pins/http
+src/pins/sss
+src/pins/tang
+src/pins/test
 tags
 test-driver

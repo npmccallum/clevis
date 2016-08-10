@@ -2,10 +2,10 @@
 
 trap 'exit' ERR
 
-e=`echo hi | ./clevis-pin-test encrypt '{"fail": false}'`
-d=`echo $e | ./clevis-pin-test decrypt`
+e=`echo hi | src/encrypt test '{"fail": false}'`
+d=`echo $e | src/decrypt`
 test "$d" == "hi"
 
-e=`echo hi | ./clevis-pin-test encrypt '{"fail": true}'`
-! echo $e | ./clevis-pin-test decrypt
+e=`echo hi | src/encrypt test '{"fail": true}'`
+! echo $e | src/decrypt
 
