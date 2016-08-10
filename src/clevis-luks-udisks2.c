@@ -17,8 +17,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "pcmd.h"
-
 #include <udisks/udisks.h>
 #include <glib-unix.h>
 #include <luksmeta.h>
@@ -33,11 +31,6 @@
 #include <stdint.h>
 
 #define MAX_UDP 65507
-
-static const luksmeta_uuid_t CLEVIS_LUKS_UUID = {
-    0xcb, 0x6e, 0x89, 0x04, 0x81, 0xff, 0x40, 0xda,
-    0xa8, 0x4a, 0x07, 0xab, 0x9a, 0xb5, 0x71, 0x5e
-};
 
 typedef char pkt_t[MAX_UDP];
 
@@ -62,10 +55,12 @@ remove_path(GList **lst, const char *path)
 static char *
 unlock_device_slot(struct context *ctx, const char *dev, int slot)
 {
+    gchar *argv[] = { "clevis", "decrypt", NULL };
     ssize_t len = strlen(dev) + 2;
-    json_t *jwe = NULL;
-    json_t *hd = NULL;
     pkt_t pkt = {};
+    gint out = -1;
+    gint in = -1;
+    GPid pid = 0;
 
     if (len > (ssize_t) sizeof(pkt))
         return NULL;
@@ -87,27 +82,34 @@ unlock_device_slot(struct context *ctx, const char *dev, int slot)
     }
 
     fprintf(stderr, "%s\tMETA\t%d\n", dev, (int) len);
-
-    tl = d2i_TANG_LUKS(NULL, &(const uint8_t *) { pkt }, len);
-    if (!tl)
+    if (len < 0)
         return NULL;
 
-    if (!TANG_LUKS_get_params(tl, &p)) {
-        TANG_LUKS_free(tl);
+    if (!g_spawn_async_with_pipes(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
+                                  NULL, NULL, &pid, &in, &out, NULL, NULL)) {
+        fprintf(stderr, "%s\tCHLD\tspawn failure\n", dev);
         return NULL;
     }
 
-    fprintf(stderr, "%s\tDATA\t%s (%s)\n", dev, p.hostname, p.service);
+    if (write(in, pkt, len) != len) {
+        fprintf(stderr, "%s\tCHLD\twrite failure\n", dev);
+        close(out);
+        close(in);
+        kill(pid, SIGTERM);
+        waitpid(pid, NULL, 0);
+        return NULL;
+    }
 
-    key = get_key(&p, tl->rec);
-    TANG_LUKS_free(tl);
-    fprintf(stderr, "%s\tTREC\t%s\n", dev, key ? "success" : "failure");
-    if (!key)
+    close(in);
+    len = read(out, pkt, sizeof(pkt));
+    close(out);
+    waitpid(pid, NULL, 0);
+    fprintf(stderr, "%s\tCHLD\t%s\n", dev,
+            len < 0 ? "read failure" : "success");
+    if (len < 0)
         return NULL;
 
-    hex = sbuf_to_hex(key, "");
-    sbuf_free(key);
-    return hex;
+    return strndup(pkt, len);
 }
 
 static gboolean
@@ -309,6 +311,11 @@ on_signal(int sig)
 static int
 load(const char *dev, int slot, pkt_t pkt)
 {
+    static const luksmeta_uuid_t CLEVIS_LUKS_UUID = {
+        0xcb, 0x6e, 0x89, 0x04, 0x81, 0xff, 0x40, 0xda,
+        0xa8, 0x4a, 0x07, 0xab, 0x9a, 0xb5, 0x71, 0x5e
+    };
+
     struct crypt_device *cd = NULL;
     luksmeta_uuid_t uuid = {};
     int r = 0;
@@ -330,7 +337,7 @@ load(const char *dev, int slot, pkt_t pkt)
         goto egress;
     }
 
-    r = luksmeta_load(cd, slot, uuid, pkt, sizeof(pkt_t));
+    r = luksmeta_load(cd, slot, uuid, (uint8_t *) pkt, sizeof(pkt_t));
     if (r >= 0 && memcmp(uuid, CLEVIS_LUKS_UUID, sizeof(uuid)) != 0)
         r = -EBADSLT;
 
