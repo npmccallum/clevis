@@ -12,8 +12,7 @@ LT_INIT([disable-static])
 
 PKG_PROG_PKG_CONFIG([0.25])
 
-PKG_CHECK_MODULES([zlib], [zlib])
-PKG_CHECK_MODULES([jose], [jose-openssl jose-zlib])
+PKG_CHECK_MODULES([jose], [jose-openssl])
 
 PKG_CHECK_MODULES([dracut], [dracut],
                   [AC_SUBST([dracutmodulesdir], [$($PKG_CONFIG --variable=dracutmodulesdir dracut)])],
@@ -94,5 +93,5 @@ AC_SUBST([CLEVIS_CFLAGS])
 AC_SUBST([CLEVIS_PINDIR], [${libdir}/${PACKAGE_NAME}/pins])
 AX_DEFINE_DIR(CLEVIS_PINDIR, CLEVIS_PINDIR, [Location of pins (plugins)])
 
-AC_CONFIG_FILES([Makefile luks/Makefile luks/askp/Makefile])
+AC_CONFIG_FILES([Makefile])
 AC_OUTPUT

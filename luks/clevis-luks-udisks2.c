@@ -17,10 +17,11 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "../../list.h"
-#include "../msg.h"
-#include "../rec.h"
-#include "asn1.h"
+#include "pcmd.h"
+
+#include <udisks/udisks.h>
+#include <glib-unix.h>
+#include <luksmeta.h>
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -28,12 +29,17 @@
 
 #include <string.h>
 
-#include <udisks/udisks.h>
-#include <glib-unix.h>
+#include <stdbool.h>
+#include <stdint.h>
 
-#define MAX_UDP 65535
+#define MAX_UDP 65507
 
-typedef uint8_t pkt_t[MAX_UDP];
+static const luksmeta_uuid_t CLEVIS_LUKS_UUID = {
+    0xcb, 0x6e, 0x89, 0x04, 0x81, 0xff, 0x40, 0xda,
+    0xa8, 0x4a, 0x07, 0xab, 0x9a, 0xb5, 0x71, 0x5e
+};
+
+typedef char pkt_t[MAX_UDP];
 
 struct context {
     UDisksClient *clt;
@@ -41,59 +47,6 @@ struct context {
     GList *lst;
     int sock;
 };
-
-static bool
-TANG_LUKS_get_params(const TANG_LUKS *tl, msg_t *params)
-{
-    if (!tl || !tl->hostname || !tl->service)
-        return false;
-
-    if (tl->hostname->length >= (int) sizeof(params->hostname))
-        return false;
-
-    if (tl->service->length >= (int) sizeof(params->service))
-        return false;
-
-    g_strlcpy(params->hostname, (char *) tl->hostname->data,
-              tl->hostname->length);
-    g_strlcpy(params->service, (char *) tl->service->data,
-              tl->service->length);
-
-    return true;
-}
-
-static sbuf_t *
-get_key(const msg_t *params, TANG_MSG_REC_REQ *req)
-{
-    EC_KEY *eckey = NULL;
-    TANG_MSG *msg = NULL;
-    sbuf_t *key = NULL;
-    BN_CTX *ctx = NULL;
-
-    ctx = BN_CTX_new();
-    if (!ctx)
-        goto error;
-
-    eckey = rec_req(req, ctx);
-    if (!eckey)
-        goto error;
-
-    msg = msg_rqst(params, &(TANG_MSG) {
-        .type = TANG_MSG_TYPE_REC_REQ,
-        .val.rec.req = req
-    });
-
-    if (!msg || msg->type != TANG_MSG_TYPE_REC_REP)
-        goto error;
-
-    key = rec_rep(msg->val.rec.rep, eckey, ctx);
-
-error:
-    EC_KEY_free(eckey);
-    TANG_MSG_free(msg);
-    BN_CTX_free(ctx);
-    return key;
-}
 
 static void
 remove_path(GList **lst, const char *path)
@@ -106,15 +59,13 @@ remove_path(GList **lst, const char *path)
     }
 }
 
-static sbuf_t *
+static char *
 unlock_device_slot(struct context *ctx, const char *dev, int slot)
 {
     ssize_t len = strlen(dev) + 2;
-    TANG_LUKS *tl = NULL;
-    sbuf_t *key = NULL;
-    sbuf_t *hex = NULL;
+    json_t *jwe = NULL;
+    json_t *hd = NULL;
     pkt_t pkt = {};
-    msg_t p = {};
 
     if (len > (ssize_t) sizeof(pkt))
         return NULL;
@@ -198,15 +149,16 @@ idle(gpointer misc)
 
         for (int slot = 0; slot < crypt_keyslot_max(CRYPT_LUKS1); slot++) {
             gboolean success = FALSE;
-            sbuf_t *key = NULL;
+            char *key = NULL;
 
             key = unlock_device_slot(ctx, dev, slot);
             if (!key)
                 continue;
 
-            success = udisks_encrypted_call_unlock_sync(
-                    enc, (char *) key->data, options, NULL, NULL, NULL);
-            sbuf_free(key);
+            success = udisks_encrypted_call_unlock_sync(enc, key, options,
+                                                        NULL, NULL, NULL);
+            memset(key, 0, strlen(key));
+            free(key);
             if (success)
                 break;
         }
@@ -378,8 +330,8 @@ load(const char *dev, int slot, pkt_t pkt)
         goto egress;
     }
 
-    r = luksmeta_get(cd, slot, uuid, pkt, sizeof(pkt_t));
-    if (r >= 0 && memcmp(uuid, TANG_LUKS_UUID, sizeof(uuid)) != 0)
+    r = luksmeta_load(cd, slot, uuid, pkt, sizeof(pkt_t));
+    if (r >= 0 && memcmp(uuid, CLEVIS_LUKS_UUID, sizeof(uuid)) != 0)
         r = -EBADSLT;
 
 egress:

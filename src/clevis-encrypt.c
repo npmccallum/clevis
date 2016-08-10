@@ -1,6 +1,6 @@
 /* vim: set tabstop=8 shiftwidth=4 softtabstop=4 expandtab smarttab colorcolumn=80: */
 /*
- * Copyright (c) 2016 Red Hat, Inc.
+ * Copyright (c) 2015 Red Hat, Inc.
  * Author: Nathaniel McCallum <npmccallum@redhat.com>
  *
  * This program is free software: you can redistribute it and/or modify
@@ -17,14 +17,31 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#pragma once
+#include <limits.h>
+#include <libgen.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <sysexits.h>
 
-#include <libcryptsetup.h>
-#include <jansson.h>
-#include <stdbool.h>
+int
+main(int argc, char *argv[])
+{
+    char self[PATH_MAX] = {};
+    char path[PATH_MAX] = {};
 
-bool
-luks_store(struct crypt_device *cd, int slot, const json_t *json);
+    if (argc != 3) {
+        fprintf(stderr, "Usage: %s PIN CONFIG\n", argv[0]);
+        return EX_USAGE;
+    }
 
-json_t *
-luks_load(struct crypt_device *cd, int slot);
+    if (readlink("/proc/self/exe", self, sizeof(self)) < 0)
+        return EX_IOERR;
+
+    if (snprintf(path, sizeof(path), "%s/clevis-pin-%s",
+                 dirname(self), argv[1]) < 0)
+        return EX_OSERR;
+
+    execv(path, (char *[]) { path, "encrypt", argv[2] });
+    fprintf(stderr, "No such pin: %s\n", argv[1]);
+    return EX_DATAERR;
+}

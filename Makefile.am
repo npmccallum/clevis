@@ -1,9 +1,7 @@
 ACLOCAL_AMFLAGS = -I m4
-SUBDIRS = . luks
+AM_CFLAGS = @CLEVIS_CFLAGS@ @jose_CFLAGS@ @luksmeta_CFLAGS@ @cryptsetup_CFLAGS@ @udisks2_CFLAGS@
 
-AM_CFLAGS = @CLEVIS_CFLAGS@ @jose_CFLAGS@
-
-bin_PROGRAMS = clevis-pin-sss clevis-pin-http clevis-pin-tang
+bin_PROGRAMS = clevis-pin-sss clevis-pin-http clevis-pin-tang clevis-encrypt clevis-decrypt
 check_PROGRAMS = clevis-pin-test
 TESTS = \
     tests/clevis-pin-test \
@@ -24,9 +22,26 @@ clevis_pin_test_LDADD = @jose_LIBS@
 
 if USE_LUKSMETA
 if USE_CRYPTSETUP
-bin_PROGRAMS += clevis-luks-bind
-clevis_luks_bind_CFLAGS = $(AM_CFLAGS) @cryptsetup_CFLAGS@ @luksmeta_CFLAGS@ @zlib_CFLAGS@
-clevis_luks_bind_SOURCES = luks/clevis-luks-bind.c luks/pcmd.c luks/pcmd.h luks/luks.c luks/luks.h
-clevis_luks_bind_LDADD = @cryptsetup_LIBS@ @luksmeta_LIBS@ @jose_LIBS@ @zlib_CFLAGS@
+dist_bin_SCRIPTS = clevis-luks-bind
+
+if USE_UDISKS2
+autostartdir = $(sysconfdir)/xdg/autostart
+autostart_DATA = luks/clevis-luks-udisks2.desktop
+libexec_PROGRAMS = clevis-luks-udisks2
+clevis_luks_udisks2_SOURCES = luks/clevis-luks-udisks2.c
+clevis_luks_udisks2_LDADD = @cryptsetup_LIBS@ @luksmeta_LIBS@ @udisks2_LIBS@
+EXTRA_DIST = luks/clevis-luks-udisks2.desktop.in
+CLEANFILES = luks/clevis-luks-udisks2.desktop
+
+install-exec-hook:
+	if [ -x $(DESTDIR)$(libexecdir)/clevis-luks-udisks2 ]; then \
+	    chmod 4711 $(DESTDIR)$(libexecdir)/clevis-luks-udisks2; \
+	fi
+
+%: %.in
+	$(AM_V_GEN)$(SED) \
+		-e 's,@libexecdir\@,$(libexecdir),g' \
+		$(srcdir)/$@.in > $@
+endif
 endif
 endif

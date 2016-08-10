@@ -22,5 +22,4 @@
 #include <stddef.h>
 
 uint8_t *
-pcmd(const char *argv0, const char *pin, const char *cmd, const char *cfg,
-     const uint8_t *in, size_t inl, size_t *outl);
+pcmd(const char **cmd, const uint8_t *in, size_t inl, size_t *outl);
