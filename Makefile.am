@@ -1,7 +1,7 @@
 ACLOCAL_AMFLAGS = -I m4
 SUBDIRS = src
 
-TESTS = tests/clevis-pin-test tests/clevis-pin-http tests/clevis-pin-sss
+TESTS = tests/pin-test tests/pin-http tests/pin-sss
 
 #if USE_LUKSMETA
 #if USE_CRYPTSETUP
