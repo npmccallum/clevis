@@ -27,6 +27,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#include <libgen.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -75,20 +76,16 @@ readall(FILE *file, size_t *len)
 }
 
 static bool
-mkcmd(const char *argv0, const char *name, char *out, size_t len)
+mkcmd(const char *name, char *out, size_t len)
 {
-    char *off = NULL;
+    char tmp[PATH_MAX] = {};
 
-    if (strlen(argv0) + strlen(name) >= len)
+    if (readlink("/proc/self/exe", tmp, sizeof(tmp) - 1) < 0)
         return false;
 
-    strcpy(out, argv0);
-    off = strrchr(out, '-');
-    if (!off || strcmp(off, "-sss") != 0)
+    if (snprintf(out, len, "%s/%s", dirname(tmp), name) < 0)
         return false;
 
-    strcpy(off, "-");
-    strcat(off, name);
     return true;
 }
 
@@ -225,7 +222,7 @@ cmd_encrypt(int argc, char *argv[])
         json_t *pin = NULL;
         size_t i = 0;
 
-        if (!mkcmd(argv[0], key, cmd, sizeof(cmd)))
+        if (!mkcmd(key, cmd, sizeof(cmd)))
             goto egress;
 
         if (json_is_object(val))
@@ -377,7 +374,7 @@ cmd_decrypt(int argc, char *argv[])
         json_t *v = NULL;
         size_t i = 0;
 
-        if (!mkcmd(argv[0], key, cmd, sizeof(cmd)))
+        if (!mkcmd(key, cmd, sizeof(cmd)))
             goto egress;
 
         json_array_foreach(val, i, v) {

@@ -16,8 +16,8 @@ function onerr() {
 
 trap 'onerr' ERR
 
-e=`echo hi | src/encrypt http "{\"url\": \"http://localhost:${PORT}/foo\"}"`
-d=`echo $e | src/decrypt`
+e=`echo hi | src/clevis/encrypt http "{\"url\": \"http://localhost:${PORT}/foo\"}"`
+d=`echo $e | src/clevis/decrypt`
 test "$d" == "hi"
 
 kill -9 $PID
@@ -25,4 +25,4 @@ kill -9 $PID
 
 trap 'exit' ERR
 
-! echo $e | src/decrypt
+! echo $e | src/clevis/decrypt

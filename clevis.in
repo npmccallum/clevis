@@ -5,6 +5,6 @@ if [ $# -lt 1 ]; then
     exit 1
 fi
 
-cmd=@clevisdir@/$1
+cmd=@libexecdir@/clevis/$1
 shift
 exec $cmd "$@"

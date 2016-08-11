@@ -52,17 +52,33 @@ remove_path(GList **lst, const char *path)
     }
 }
 
+#include <libgen.h>
+
+static bool
+get_decrypt_path(char *path, size_t pathl)
+{
+    char tmp[pathl];
+
+    memset(tmp, 0, pathl);
+    if (readlink("/proc/self/exe", tmp, sizeof(tmp) - 1) < 0)
+        return false;
+
+    if (snprintf(path, pathl, "%s/clevis/decrypt", dirname(tmp)) < 0)
+        return false;
+
+    return true;
+}
+
 static char *
 unlock_device_slot(struct context *ctx, const char *dev, int slot)
 {
-    gchar *argv[] = { "clevis", "decrypt", NULL };
     ssize_t len = strlen(dev) + 2;
+    char path[PATH_MAX] = {};
     pkt_t pkt = {};
     gint out = -1;
     gint in = -1;
-    GPid pid = 0;
 
-    if (len > (ssize_t) sizeof(pkt))
+    if (len > (ssize_t) sizeof(pkt) || !get_decrypt_path(path, sizeof(path)))
         return NULL;
 
     pkt[0] = slot;
@@ -85,8 +101,9 @@ unlock_device_slot(struct context *ctx, const char *dev, int slot)
     if (len < 0)
         return NULL;
 
-    if (!g_spawn_async_with_pipes(NULL, argv, NULL, G_SPAWN_SEARCH_PATH,
-                                  NULL, NULL, &pid, &in, &out, NULL, NULL)) {
+    if (!g_spawn_async_with_pipes(NULL, (gchar *[]) { path, NULL }, NULL,
+                                  G_SPAWN_DEFAULT, NULL, NULL, NULL,
+                                  &in, &out, NULL, NULL)) {
         fprintf(stderr, "%s\tCHLD\tspawn failure\n", dev);
         return NULL;
     }
@@ -95,15 +112,12 @@ unlock_device_slot(struct context *ctx, const char *dev, int slot)
         fprintf(stderr, "%s\tCHLD\twrite failure\n", dev);
         close(out);
         close(in);
-        kill(pid, SIGTERM);
-        waitpid(pid, NULL, 0);
         return NULL;
     }
 
     close(in);
     len = read(out, pkt, sizeof(pkt));
     close(out);
-    waitpid(pid, NULL, 0);
     fprintf(stderr, "%s\tCHLD\t%s\n", dev,
             len < 0 ? "read failure" : "success");
     if (len < 0)
