@@ -433,7 +433,7 @@ nagios_recover(const char *url, const json_t *jwk,
         return true;
     }
 
-    if (!jose_jwk_allowed(jwk, true, NULL, "tang.derive") &&
+    if (!jose_jwk_allowed(jwk, true, NULL, "deriveKey") &&
         !jose_jwk_allowed(jwk, true, NULL, "wrapKey"))
         return true;
 

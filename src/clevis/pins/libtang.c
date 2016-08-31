@@ -28,149 +28,17 @@
 
 #include <string.h>
 
-static json_t *
-anon(const json_t *jwk, json_t *jwkt, size_t bytes)
+#define json_auto_t json_t __attribute__((cleanup(json_decrefp)))
+
+static void
+json_decrefp(json_t **json)
 {
-    const int iter = 1000;
-    json_t *state = NULL;
-    json_t *req = NULL;
-    EC_POINT *k = NULL;
-    BN_CTX *ctx = NULL;
-    EC_KEY *lcl = NULL;
-    EC_KEY *rem = NULL;
-    char *pass = NULL;
-    uint8_t ky[bytes];
-    uint8_t st[bytes];
-
-    rem = jose_openssl_jwk_to_EC_KEY(jwk);
-    if (!rem)
-        goto egress;
-
-    lcl = EC_KEY_new();
-    if (!lcl)
-        goto egress;
-
-    if (EC_KEY_set_group(lcl, EC_KEY_get0_group(rem)) <= 0)
-        goto egress;
-
-    if (EC_KEY_generate_key(lcl) <= 0)
-        goto egress;
-
-    k = EC_POINT_new(EC_KEY_get0_group(rem));
-    if (!k)
-        goto egress;
-
-    ctx = BN_CTX_new();
-    if (!ctx)
-        goto egress;
-
-    if (EC_POINT_mul(EC_KEY_get0_group(rem), k, NULL,
-                     EC_KEY_get0_public_key(rem),
-                     EC_KEY_get0_private_key(lcl), ctx) <= 0)
-        goto egress;
-
-    if (RAND_bytes(st, sizeof(st)) <= 0)
-        goto egress;
-
-    pass = EC_POINT_point2hex(EC_KEY_get0_group(lcl), k,
-                              POINT_CONVERSION_COMPRESSED, ctx);
-    if (!pass)
-        goto egress;
-
-    if (PKCS5_PBKDF2_HMAC(pass, strlen(pass), st, bytes, iter,
-                          EVP_sha256(), bytes, ky) <= 0)
-        goto egress;
-
-    req = jose_openssl_jwk_from_EC_POINT(EC_KEY_get0_group(lcl),
-                                         EC_KEY_get0_public_key(lcl), NULL);
-    if (!req)
-        goto egress;
-
-    if (json_object_set_new(req, "kid",
-                            json_deep_copy(json_object_get(jwk, "kid"))) != 0)
-        goto egress;
-
-    state = json_pack("{s:i,s:s,s:o,s:o,s:o,s:O}",
-                      "iter", iter, "hash", "sha256",
-                      "jwk", json_deep_copy(jwk),
-                      "jwkt", json_deep_copy(jwkt),
-                      "salt", jose_b64_encode_json(st, bytes),
-                      "req", req);
-
-    if (json_object_set_new(jwkt, "k", jose_b64_encode_json(ky, bytes)) != 0) {
-        json_decref(state);
-        state = NULL;
-    }
-
-egress:
-    memset(ky, 0, sizeof(ky));
-    memset(st, 0, sizeof(st));
-    OPENSSL_free(pass);
-    EC_POINT_free(k);
-    BN_CTX_free(ctx);
-    EC_KEY_free(lcl);
-    EC_KEY_free(rem);
-    json_decref(req);
-    return state;
-}
-
-static json_t *
-wrap(const json_t *jwk, json_t *jwkt, size_t bytes)
-{
-    uint8_t ky[bytes * 3];
-    json_t *state = NULL;
-    json_t *jwe = NULL;
-    json_t *cek = NULL;
-    json_t *pt = NULL;
-
-    if (RAND_bytes(ky, sizeof(ky)) <= 0)
-        return false;
-
-    if (json_object_set_new(jwkt, "k", jose_b64_encode_json(ky, bytes)) != 0)
-        goto egress;
-
-    for (size_t i = 0; i < bytes; i++)
-        ky[i] ^= ky[bytes + i];
-
-    pt = json_pack("{s:o,s:o}", "key", jose_b64_encode_json(ky, bytes),
-                   "bid", jose_b64_encode_json(&ky[bytes * 2], bytes));
-    if (!pt)
-        goto egress;
-
-    jwe = json_pack("{s:{s:o}}", "protected",
-                    "kid", json_deep_copy(json_object_get(jwk, "kid")));
-    cek = json_object();
-    if (!jwe || !cek)
-        goto egress;
-
-    if (!jose_jwe_wrap(jwe, cek, jwk, NULL))
-        goto egress;
-
-    if (!jose_jwe_encrypt_json(jwe, cek, pt))
-        goto egress;
-
-    state = json_pack("{s:O,s:o,s:o,s:O,s:o}",
-                      "jwe", jwe,
-                      "jwk", json_deep_copy(jwk),
-                      "jwkt", json_deep_copy(jwkt),
-                      "bid", json_object_get(pt, "bid"),
-                      "otp", jose_b64_encode_json(&ky[bytes], bytes));
-
-    if (json_object_del(json_object_get(state, "jwkt"), "k") != 0) {
-        json_decref(state);
-        state = NULL;
-    }
-
-egress:
-    memset(ky, 0, sizeof(ky));
-    json_decref(jwe);
-    json_decref(cek);
-    json_decref(pt);
-    return state;
+    if (json)
+        json_decref(*json);
 }
 
 json_t *
-adv_vld(const json_t *jws)
+tang_validate(const json_t *jws)
 {
     json_t *jwkset = NULL;
     json_t *keys = NULL;
@@ -223,370 +91,209 @@ error:
     return NULL;
 }
 
-json_t *
-adv_rep(const json_t *jwk, json_t *jwkt)
+bool
+tang_bind(json_t *jwe, json_t *cek, const json_t *jwk, const char *url)
 {
+    json_auto_t *rcp = NULL;
+    json_auto_t *key = NULL;
     const char *kty = NULL;
-    int bytes = 0;
 
-    if (json_unpack(jwkt, "{s:s,s:i}", "kty", &kty, "bytes", &bytes))
-        return NULL;
+    rcp = json_pack("{s:{s:o,s:s}}", "header",
+                    "jwk", json_deep_copy(jwk),
+                    "clevis.url", url);
+    if (!rcp)
+        return false;
 
-    if (strcmp(kty, "oct") != 0 || bytes <= 0)
-        return NULL;
-
-    if (json_object_del(jwkt, "bytes") < 0)
-        return NULL;
-
-    if (jose_jwk_allowed(jwk, true, NULL, "tang.derive"))
-        return anon(jwk, jwkt, bytes);
-
-    if (jose_jwk_allowed(jwk, true, NULL, "wrapKey"))
-        return wrap(jwk, jwkt, bytes);
-
-    return NULL;
-}
-
-static void __attribute__((constructor))
-constructor(void)
-{
-    static jose_jwk_op_t tang = {
-        .pub = "tang.derive",
-        .prv = "tang.recover",
-        .use = "tang"
-    };
-
-    jose_jwk_register_op(&tang);
-}
-
-static json_t *
-req_anon(json_t *state)
-{
-    EC_POINT *p = NULL;
-    BN_CTX *ctx = NULL;
-    EC_KEY *eph = NULL;
-    EC_KEY *key = NULL;
-    json_t *jwk = NULL;
-    json_t *req = NULL;
-
-    /* Unpack state values. */
-    if (json_unpack(state, "{s:o}", "req", &jwk) != 0)
-        return NULL;
-
-    key = jose_openssl_jwk_to_EC_KEY(jwk);
+    key = json_deep_copy(jwk);
     if (!key)
-        goto egress;
+        return false;
 
-    /* Generate the ephemeral key. */
-    eph = EC_KEY_new();
-    if (!eph)
-        goto egress;
+    if (json_unpack((json_t *) jwk, "{s:s}", "kty", &kty) < 0)
+        return false;
 
-    if (EC_KEY_set_group(eph, EC_KEY_get0_group(key)) <= 0)
-        goto egress;
+    if (jose_jwk_allowed(jwk, true, NULL, "deriveKey")) {
+        json_object_del(key, "key_ops");
+        if (strcmp(kty, "EC") != 0)
+            return false;
+    } else if (!jose_jwk_allowed(jwk, true, NULL, "wrapKey"))
+        return false;
 
-    if (EC_KEY_generate_key(eph) <= 0)
-        goto egress;
-
-    if (json_object_set_new(state, "eph",
-                            jose_openssl_jwk_from_EC_KEY(eph)) != 0)
-        goto egress;
-
-
-    /* Perform point addition. */
-    ctx = BN_CTX_new();
-    if (!ctx)
-        goto egress;
-
-    p = EC_POINT_new(EC_KEY_get0_group(key));
-    if (!p)
-        goto egress;
-
-    if (EC_POINT_add(EC_KEY_get0_group(key), p,
-                     EC_KEY_get0_public_key(eph),
-                     EC_KEY_get0_public_key(key), ctx) <= 0)
-        goto egress;
-
-    /* Create output request. */
-    req = jose_openssl_jwk_from_EC_POINT(EC_KEY_get0_group(key), p, NULL);
-    if (!req)
-        goto egress;
-
-    if (json_object_update_missing(req, jwk) != 0) {
-        json_decref(req);
-        req = NULL;
-    }
-
-egress:
-    EC_POINT_free(p);
-    EC_KEY_free(eph);
-    EC_KEY_free(key);
-    BN_CTX_free(ctx);
-    return req;
+    return jose_jwe_wrap(jwe, cek, key, json_incref(rcp));
 }
 
 static json_t *
-req_wrap(json_t *state)
+add(const json_t *a, const json_t *b, bool inv)
 {
-    const json_t *jwk = NULL;
-    const json_t *jwe = NULL;
-    uint8_t *otp = NULL;
-    uint8_t *xor = NULL;
-    json_t *cek = NULL;
-    json_t *pt = NULL;
-    json_t *ct = NULL;
-    size_t len = 0;
-
-    otp = jose_b64_decode_json(json_object_get(state, "otp"), &len);
-    if (!otp)
-        return NULL;
-
-    xor = malloc(len);
-    if (!xor) {
-        memset(otp, 0, len);
-        free(otp);
-        return NULL;
-    }
-
-    jwk = json_object_get(state, "jwk");
-    jwe = json_object_get(state, "jwe");
-    if (!jwk || !jwe)
-        goto error;
-
-    if (RAND_bytes(xor, len) <= 0)
-        goto error;
-
-    for (size_t i = 0; i < len; i++)
-        otp[i] ^= xor[i];
-
-    pt = json_pack("{s:O,s:o}", "jwe", jwe,
-                   "otp", jose_b64_encode_json(xor, len));
-    if (!pt)
-        goto error;
-
-    ct = json_pack("{s:{s:O}}", "protected",
-                   "kid", json_object_get(jwk, "kid"));
-    if (!ct)
-        goto error;
-
-    cek = json_object();
-    if (!cek)
-        goto error;
-
-    if (!jose_jwe_wrap(ct, cek, jwk, NULL))
-        goto error;
-
-    if (!jose_jwe_encrypt_json(ct, cek, pt))
-        goto error;
-
-    if (json_object_set_new(state, "tmp", jose_b64_encode_json(otp, len)) != 0)
-        goto error;
-
-    memset(otp, 0, len);
-    memset(xor, 0, len);
-    json_decref(cek);
-    json_decref(pt);
-    free(otp);
-    free(xor);
-    return ct;
-
-error:
-    memset(otp, 0, len);
-    memset(xor, 0, len);
-    json_decref(cek);
-    json_decref(pt);
-    json_decref(ct);
-    free(otp);
-    free(xor);
-    return NULL;
-}
-
-static json_t *
-kdf(json_t *state, const EC_GROUP *grp, const EC_POINT *p, BN_CTX *ctx)
-{
-    static const struct {
-        const char *name;
-        const EVP_MD *(*md)(void);
-    } table[] = {
-        { "sha256", EVP_sha256 },
-        {}
-    };
-
-    const EVP_MD *md = NULL;
-    const char *salt = NULL;
-    const char *hash = NULL;
-    json_t *out = NULL;
-    uint8_t *ky = NULL;
-    uint8_t *st = NULL;
-    char *pass = NULL;
-    size_t len = 0;
-    int iter = 1;
-
-    if (json_unpack(state, "{s:s,s:s,s:i}",
-                    "hash", &hash, "salt", &salt, "iter", &iter) != 0)
-        return NULL;
-
-    for (size_t i = 0; table[i].name && !md; i++) {
-        if (strcmp(table[i].name, hash) == 0)
-            md = table[i].md();
-    }
-
-    if (!md)
-        return NULL;
-
-    st = jose_b64_decode(salt, &len);
-    if (!st)
-        return NULL;
-
-    ky = malloc(len);
-    if (!ky)
-        goto egress;
-
-    pass = EC_POINT_point2hex(grp, p, POINT_CONVERSION_COMPRESSED, ctx);
-    if (!pass)
-        goto egress;
-
-    if (PKCS5_PBKDF2_HMAC(pass, strlen(pass), st, len, iter, md, len, ky) <= 0)
-        goto egress;
-
-    out = json_deep_copy(json_object_get(state, "jwkt"));
-    if (out) {
-        if (json_object_set_new(out, "k", jose_b64_encode_json(ky, len)) < 0) {
-            json_decref(out);
-            out = NULL;
-        }
-    }
-
-egress:
-    memset(st, 0, len);
-
-    if (ky)
-        memset(ky, 0, len);
-
-    if (pass)
-        memset(pass, 0, strlen(pass));
-
-    OPENSSL_free(pass);
-    free(st);
-    free(ky);
-    return out;
-}
-
-static json_t *
-rep_anon(json_t *state, const json_t *rep)
-{
-    const json_t *tmp = NULL;
-    const json_t *jwk = NULL;
-    EC_POINT *p = NULL;
-    EC_KEY *eph = NULL;
-    EC_KEY *key = NULL;
-    EC_KEY *rpl = NULL;
-    BN_CTX *ctx = NULL;
-    json_t *out = NULL;
-
-    ctx = BN_CTX_new();
-    if (!ctx)
-        goto egress;
-
-    /* Load all the keys required for recovery. */
-    if (json_unpack(state, "{s:o,s:o}", "eph", &tmp, "jwk", &jwk) != 0)
-        goto egress;
-
-    eph = jose_openssl_jwk_to_EC_KEY(tmp);
-    key = jose_openssl_jwk_to_EC_KEY(jwk);
-    rpl = jose_openssl_jwk_to_EC_KEY(rep);
-    if (!eph || !key || !rpl)
-        goto egress;
-
-    if (EC_GROUP_cmp(EC_KEY_get0_group(rpl), EC_KEY_get0_group(eph), ctx) != 0)
-        goto egress;
-
-    /* Perform recovery. */
-    p = EC_POINT_new(EC_KEY_get0_group(eph));
-    if (!p)
-        goto egress;
-
-    if (EC_POINT_mul(EC_KEY_get0_group(key), p, NULL,
-                     EC_KEY_get0_public_key(key),
-                     EC_KEY_get0_private_key(eph), ctx) <= 0)
-        goto egress;
-
-    if (EC_POINT_invert(EC_KEY_get0_group(key), p, ctx) <= 0)
-        goto egress;
-
-    if (EC_POINT_add(EC_KEY_get0_group(key), p, p,
-                     EC_KEY_get0_public_key(rpl), ctx) <= 0)
-        goto egress;
-
-    /* Create output key. */
-    out = kdf(state, EC_KEY_get0_group(key), p, ctx);
-
-egress:
-    EC_POINT_free(p);
-    EC_KEY_free(eph);
-    EC_KEY_free(key);
-    EC_KEY_free(rpl);
-    BN_CTX_free(ctx);
-    return out;
-}
-
-static json_t *
-rep_wrap(json_t *state, const json_t *rep)
-{
-    uint8_t *otp = NULL;
-    uint8_t *key = NULL;
-    json_t *out = NULL;
-    size_t otpl = 0;
-    size_t keyl = 0;
-
-    otp = jose_b64_decode_json(json_object_get(state, "tmp"), &otpl);
-    if (!otp)
-        return NULL;
-
-    key = jose_b64_decode_json(json_object_get(rep, "k"), &keyl);
-    if (!key) {
-        memset(otp, 0, otpl);
-        free(otp);
-        return NULL;
-    }
-
-    if (otpl != keyl)
-        goto egress;
-
-    for (size_t i = 0; i < otpl; i++)
-        key[i] ^= otp[i];
-
-    out = json_deep_copy(json_object_get(state, "jwkt"));
-    if (out) {
-        if (json_object_set_new(out, "k",
-                                jose_b64_encode_json(key, keyl)) < 0) {
-            json_decref(out);
-            out = NULL;
-        }
-    }
-
-egress:
-    memset(otp, 0, otpl);
-    memset(key, 0, keyl);
-    free(otp);
-    free(key);
-    return out;
-}
-
-json_t *
-rec_req(json_t *state)
-{
-    json_t *out = NULL;
-
-    out = req_wrap(state);
-    return out ? out : req_anon(state);
-}
-
-json_t *
-rec_rep(json_t *state, const json_t *rep)
-{
+    const EC_GROUP *grp = NULL;
     json_t *jwk = NULL;
+    BN_CTX *ctx = NULL;
+    EC_POINT *p = NULL;
+    EC_KEY *ak = NULL;
+    EC_KEY *bk = NULL;
 
-    jwk = rep_wrap(state, rep);
-    return jwk ? jwk : rep_anon(state, rep);
+    ak = jose_openssl_jwk_to_EC_KEY(a);
+    bk = jose_openssl_jwk_to_EC_KEY(b);
+    ctx = BN_CTX_new();
+    if (!ak || !bk || !ctx)
+        goto egress;
+
+    grp = EC_KEY_get0_group(ak);
+    if (EC_GROUP_cmp(grp, EC_KEY_get0_group(bk), ctx) != 0)
+        goto egress;
+
+    p = EC_POINT_new(grp);
+    if (!p)
+        goto egress;
+
+    if (EC_POINT_copy(p, EC_KEY_get0_public_key(bk)) < 0)
+        goto egress;
+
+    if (inv) {
+        if (EC_POINT_invert(grp, p, ctx) < 0)
+            goto egress;
+    }
+
+    if (EC_POINT_add(grp, p, EC_KEY_get0_public_key(ak), p, ctx) < 0)
+        goto egress;
+
+    jwk = jose_openssl_jwk_from_EC_POINT(EC_KEY_get0_group(ak), p, NULL);
+
+egress:
+    BN_CTX_free(ctx);
+    EC_POINT_free(p);
+    EC_KEY_free(ak);
+    EC_KEY_free(bk);
+    return jwk;
+}
+
+bool
+tang_prepare(const json_t *jwe, const json_t *rcp, json_t **req, json_t **eph)
+{
+    json_auto_t *hdr = NULL;
+    json_auto_t *jwk = NULL;
+
+    hdr = jose_jwe_merge_header(jwe, rcp);
+    if (!hdr)
+        return false;
+
+    jwk = json_object_get(hdr, "jwk");
+    if (!jwk)
+        return false;
+
+    if (jose_jwk_allowed(jwk, true, NULL, "wrapKey")) {
+        json_auto_t *outer = NULL;
+        json_auto_t *inner = NULL;
+        json_auto_t *cek = NULL;
+        json_auto_t *key = NULL;
+        json_t *tmp = NULL;
+
+        key = json_pack("{s:s}", "alg", "A128GCMKW");
+        if (!key)
+            return false;
+
+        if (!jose_jwk_generate(key))
+            return false;
+
+        inner = json_deep_copy(rcp);
+        if (!inner)
+            return false;
+
+        tmp = json_object_get(inner, "header");
+        if (!tmp)
+            return false;
+
+        if (json_object_del(tmp, "jwk") < 0)
+            return false;
+
+        if (json_object_del(tmp, "clevis.url") < 0)
+            return false;
+
+        if (json_object_set(tmp, "tang.jwk", key) < 0)
+            return false;
+
+        tmp = json_object_get(jwe, "protected");
+        if (tmp && json_object_set(inner, "protected", tmp) < 0)
+            return false;
+
+        tmp = json_object_get(jwe, "unprotected");
+        if (tmp && json_object_set(inner, "unprotected", tmp) < 0)
+            return false;
+
+        outer = json_object();
+        cek = json_object();
+        if (!outer || !cek)
+            return false;
+
+        if (!jose_jwe_wrap(outer, cek, jwk, NULL))
+            return false;
+
+        if (!jose_jwe_encrypt_json(outer, cek, inner))
+            return false;
+
+        *req = json_incref(outer);
+        *eph = json_incref(key);
+        return true;
+    }
+
+    if (jose_jwk_allowed(jwk, true, NULL, "deriveKey")) {
+        json_auto_t *tmp = NULL;
+        json_auto_t *key = NULL;
+        json_t *epk = NULL;
+
+        epk = json_object_get(hdr, "epk");
+        if (!epk)
+            return false;
+
+        tmp = json_pack("{s:s,s:O}", "kty", "EC", "crv",
+                        json_object_get(jwk, "crv"));
+        if (!tmp)
+            return false;
+
+        if (!jose_jwk_generate(tmp))
+            return false;
+
+        key = add(tmp, epk, false);
+        if (!req)
+            return false;
+
+        *req = json_incref(key);
+        *eph = json_incref(tmp);
+        return true;
+    }
+
+    return false;
+}
+
+json_t *
+tang_recover(const json_t *jwe, const json_t *rcp,
+             const json_t *eph, const json_t *rep)
+{
+    json_auto_t *hdr = NULL;
+    json_auto_t *jwk = NULL;
+
+    hdr = jose_jwe_merge_header(jwe, rcp);
+    if (!hdr)
+        return NULL;
+
+    jwk = json_object_get(hdr, "jwk");
+    if (!jwk)
+        return NULL;
+
+    if (jose_jwk_allowed(jwk, true, NULL, "wrapKey")) {
+    }
+
+    if (jose_jwk_allowed(jwk, true, NULL, "deriveKey")) {
+        json_auto_t *exc = NULL;
+        json_auto_t *rec = NULL;
+
+        exc = jose_jwk_exchange(eph, jwk);
+        if (!exc)
+            return NULL;
+
+        rec = add(rep, exc, true);
+        if (!rec)
+            return NULL;
+    }
+
+    return NULL;
 }

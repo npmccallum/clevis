@@ -20,6 +20,7 @@
 #pragma once
 
 #include <jansson.h>
+#include <stdbool.h>
 
 /**
  * Validates an advertisement.
@@ -29,35 +30,33 @@
  * of the keys inside the advertisement payload on success.
  */
 json_t *
-adv_vld(const json_t *jws);
+tang_validate(const json_t *jws);
 
 /**
- * Generate a new binding key and return state.
+ * Encrypt data using the specified binding key.
  *
- * The new binding key will be bound to jwk.
- * The jwkt will be filled in with the new key data.
- *
- * Returns the state to be used in the rec_req() and rec_rep() functions.
+ * Returns a JWE along with headers required for recovery.
  */
-json_t *
-adv_rep(const json_t *jwk, json_t *jwkt);
+bool
+tang_bind(json_t *jwe, json_t *cek, const json_t *jwk, const char *url);
 
 /**
- * Creates the recovery request from the state.
+ * Creates the recovery request from the JWE.
  *
- * DO NOT persist state after calling this function as it may be modified.
+ * DO NOT persist JWE after calling this function as it may be modified.
  *
  * Returns the recovery request.
  */
-json_t *
-rec_req(json_t *state);
+bool
+tang_prepare(const json_t *jwe, const json_t *rcp, json_t **req, json_t **eph);
 
 /**
  * Recovers the key after a recovery request.
  *
- * DO NOT persist state after calling this function as it may be modified.
+ * DO NOT persist JWE after calling this function as it may be modified.
  *
- * Returns the recovered JWK (the same key as jwkt after adv_rep()).
+ * Returns the recovered data.
  */
 json_t *
-rec_rep(json_t *state, const json_t *rep);
+tang_recover(const json_t *jwe, const json_t *rcp,
+             const json_t *eph, const json_t *rep);
