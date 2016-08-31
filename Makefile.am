@@ -1,5 +1,5 @@
 ACLOCAL_AMFLAGS = -I m4
-SUBDIRS = src
+SUBDIRS = src cmd
 
 TESTS = tests/pin-test tests/pin-http tests/pin-sss
 

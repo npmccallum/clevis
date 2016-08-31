@@ -1,5 +1,3 @@
-SUBDIRS = clevis
-
 AM_CFLAGS = @CLEVIS_CFLAGS@ @jose_CFLAGS@ @luksmeta_CFLAGS@ @udisks2_CFLAGS@
 
 EXTRA_DIST = clevis-luks-udisks2.desktop.in
