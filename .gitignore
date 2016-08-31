@@ -38,9 +38,9 @@ missing
 clevis
 src/clevis-luks-udisks2
 src/clevis-luks-udisks2.desktop
-src/clevis/pins/http
-src/clevis/pins/sss
-src/clevis/pins/tang
-src/clevis/pins/test
+cmd/pins/http
+cmd/pins/sss
+cmd/pins/tang
+cmd/pins/test
 tags
 test-driver
