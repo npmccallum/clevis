@@ -28,19 +28,23 @@
 
 #include <string.h>
 
+#ifndef json_auto_t
 #define json_auto_t json_t __attribute__((cleanup(json_decrefp)))
 
 static void
 json_decrefp(json_t **json)
 {
-    if (json)
+    if (json) {
         json_decref(*json);
+        *json = NULL;
+    }
 }
+#endif
 
 json_t *
 tang_validate(const json_t *jws)
 {
-    json_t *jwkset = NULL;
+    json_auto_t *jwkset = NULL;
     json_t *keys = NULL;
     size_t sigs = 0;
 
@@ -50,45 +54,24 @@ tang_validate(const json_t *jws)
 
     keys = json_object_get(jwkset, "keys");
     if (!json_is_array(keys))
-        goto error;
+        return NULL;
 
     for (size_t i = 0; i < json_array_size(keys); i++) {
         json_t *key = json_array_get(keys, i);
-        const char *kid = NULL;
-        char *thp = NULL;
-        bool eq = false;
-
-        if (json_unpack(key, "{s:s}", "kid", &kid) != 0)
-            goto error;
-
-        thp = jose_jwk_thumbprint(key, "sha256");
-        if (!thp)
-            goto error;
-
-        eq = strcmp(thp, kid) == 0;
-        free(thp);
-        if (!eq)
-            goto error;
 
         if (!jose_jwk_allowed(key, true, NULL, "verify"))
             continue;
 
         if (!jose_jws_verify(jws, key))
-            goto error;
+            return NULL;
 
         sigs++;
     }
 
     if (sigs == 0)
-        goto error;
+        return NULL;
 
-    keys = json_incref(keys);
-    json_decref(jwkset);
-    return keys;
-
-error:
-    json_decref(jwkset);
-    return NULL;
+    return json_incref(keys);
 }
 
 bool
@@ -96,7 +79,6 @@ tang_bind(json_t *jwe, json_t *cek, const json_t *jwk, const char *url)
 {
     json_auto_t *rcp = NULL;
     json_auto_t *key = NULL;
-    const char *kty = NULL;
 
     rcp = json_pack("{s:{s:o,s:s}}", "header",
                     "jwk", json_deep_copy(jwk),
@@ -108,13 +90,16 @@ tang_bind(json_t *jwe, json_t *cek, const json_t *jwk, const char *url)
     if (!key)
         return false;
 
-    if (json_unpack((json_t *) jwk, "{s:s}", "kty", &kty) < 0)
-        return false;
-
     if (jose_jwk_allowed(jwk, true, NULL, "deriveKey")) {
-        json_object_del(key, "key_ops");
+        const char *kty = NULL;
+
+        if (json_unpack((json_t *) jwk, "{s:s}", "kty", &kty) < 0)
+            return false;
+
         if (strcmp(kty, "EC") != 0)
             return false;
+
+        json_object_del(key, "key_ops");
     } else if (!jose_jwk_allowed(jwk, true, NULL, "wrapKey"))
         return false;
 
@@ -280,6 +265,13 @@ tang_recover(const json_t *jwe, const json_t *rcp,
         return NULL;
 
     if (jose_jwk_allowed(jwk, true, NULL, "wrapKey")) {
+        json_auto_t *cek = NULL;
+
+        cek = jose_jwe_unwrap(rep, NULL, eph);
+        if (!cek)
+            return NULL;
+
+        return jose_jwe_decrypt_json(rep, cek);
     }
 
     if (jose_jwk_allowed(jwk, true, NULL, "deriveKey")) {
@@ -293,6 +285,8 @@ tang_recover(const json_t *jwe, const json_t *rcp,
         rec = add(rep, exc, true);
         if (!rec)
             return NULL;
+
+        return jose_jwe_unwrap(jwe, rcp, rec);
     }
 
     return NULL;
