@@ -29,16 +29,6 @@
 #define BIGNUM_auto __attribute__((cleanup(BN_cleanup))) BIGNUM
 #define BN_CTX_auto __attribute__((cleanup(BN_CTX_cleanup))) BN_CTX
 
-static void
-clear_free(void *mem, size_t len)
-{
-    if (!mem)
-        return;
-
-    memset(mem, 0, len);
-    free(mem);
-}
-
 static BIGNUM *
 bn_decode(const uint8_t buf[], size_t len)
 {
@@ -48,18 +38,13 @@ bn_decode(const uint8_t buf[], size_t len)
 static BIGNUM *
 bn_decode_json(const json_t *json)
 {
-    uint8_t *buf = NULL;
-    BIGNUM *bn = NULL;
-    size_t len = 0;
+    jose_buf_auto_t *buf = NULL;
 
-    buf = jose_b64_decode_json(json, &len);
+    buf = jose_b64_decode_json(json);
     if (!buf)
         return NULL;
 
-    bn = bn_decode(buf, len);
-
-    clear_free(buf, len);
-    return bn;
+    return bn_decode(buf->data, buf->size);
 }
 
 static bool
@@ -84,7 +69,7 @@ bn_encode(const BIGNUM *bn, uint8_t buf[], size_t len)
 static json_t *
 bn_encode_json(const BIGNUM *bn, size_t len)
 {
-    uint8_t *buf = NULL;
+    jose_buf_auto_t *buf = NULL;
     json_t *out = NULL;
 
     if (!bn)
@@ -96,12 +81,10 @@ bn_encode_json(const BIGNUM *bn, size_t len)
     if ((int) len < BN_num_bytes(bn))
         return false;
 
-    buf = malloc(len);
+    buf = jose_buf(len, JOSE_BUF_FLAG_WIPE);
     if (buf) {
-        if (bn_encode(bn, buf, len))
-            out = jose_b64_encode_json(buf, len);
-
-        clear_free(buf, len);
+        if (bn_encode(bn, buf->data, buf->size))
+            out = jose_b64_encode_json(buf->data, buf->size);
     }
 
     return out;
@@ -136,7 +119,7 @@ sss_generate(size_t key_bytes, size_t threshold)
     if (!p || !e)
         goto error;
 
-    if (!BN_generate_prime(p, key_bytes * 8, 1, NULL, NULL, NULL, NULL))
+    if (!BN_generate_prime_ex(p, key_bytes * 8, 1, NULL, NULL, NULL))
         goto error;
 
     sss = json_pack("{s:i,s:[],s:o}", "t", threshold, "e", "p",

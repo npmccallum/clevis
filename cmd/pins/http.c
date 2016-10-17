@@ -135,12 +135,11 @@ egress:
 static int
 decrypt(int argc, char *argv[])
 {
+    jose_buf_auto_t *pt = NULL;
     int ret = EXIT_FAILURE;
     const char *url = NULL;
     json_t *cek = NULL;
     json_t *jwe = NULL;
-    uint8_t *pt = NULL;
-    size_t ptl = 0;
     int r = 0;
 
     struct http_msg *rep = NULL;
@@ -179,19 +178,17 @@ decrypt(int argc, char *argv[])
     if (!cek)
         goto egress;
 
-    pt = jose_jwe_decrypt(jwe, cek, &ptl);
+    pt = jose_jwe_decrypt(jwe, cek);
     if (!pt)
         goto egress;
 
-    fwrite(pt, ptl, 1, stdout);
+    fwrite(pt->data, pt->size, 1, stdout);
     ret = EXIT_SUCCESS;
 
 egress:
-    memset(pt, 0, ptl);
     http_msg_free(rep);
     json_decref(cek);
     json_decref(jwe);
-    free(pt);
     return ret;
 }
 

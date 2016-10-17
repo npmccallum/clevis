@@ -83,44 +83,40 @@ http_json(const char *url, const char *sfx, enum http_method method,
     return *rep ? 200 : -EBADMSG;
 }
 
-static uint8_t *
-readkey(FILE *file, size_t *len)
+static jose_buf_t *
+readkey(FILE *file)
 {
-    uint8_t *out = NULL;
+    jose_buf_auto_t *out = NULL;
 
-    *len = 0;
-
-    while (true) {
-        uint8_t *tmp = NULL;
+    while (!feof(file)) {
+        jose_buf_t *tmp = NULL;
+        uint8_t buf[4096];
         size_t r = 0;
 
-        tmp = realloc(out, *len + 16);
-        if (!tmp)
-            break;
-        out = tmp;
+        r = fread(buf, 1, sizeof(buf), file);
+        if (ferror(file))
+            return NULL;
 
-        r = fread(&out[*len], 1, 16, file);
-        *len += r;
-        if (r < 16) {
-            if (ferror(file) || *len == 0)
-                break;
-            if (feof(file))
-                return out;
-        }
+        tmp = jose_buf(out ? out->size : 0 + r, JOSE_BUF_FLAG_WIPE);
+        if (!tmp)
+            return NULL;
+
+        if (out)
+            memcpy(tmp->data, out->data, out->size);
+
+        memcpy(&tmp->data[out ? out->size : 0], buf, r);
+        jose_buf_decref(out);
+        out = tmp;
     }
 
-    if (out)
-        memset(out, 0, *len);
-
-    free(out);
-    return NULL;
+    return jose_buf_incref(out);
 }
 
 static json_t *
 load_adv(const char *filename)
 {
-    json_t *keys = NULL;
-    json_t *adv = NULL;
+    json_auto_t *keys = NULL;
+    json_auto_t *adv = NULL;
     FILE *file = NULL;
 
     file = fopen(filename, "r");
@@ -131,20 +127,14 @@ load_adv(const char *filename)
     fclose(file);
 
     keys = adv_vld(adv);
-    json_decref(keys);
-    if (!keys) {
-        json_decref(adv);
-        return NULL;
-    }
-
-    return adv;
+    return keys ? json_incref(adv) : NULL;
 }
 
 static json_t *
 dnld_adv(const char *url)
 {
-    json_t *keys = NULL;
-    json_t *adv = NULL;
+    json_auto_t *keys = NULL;
+    json_auto_t *adv = NULL;
     json_t *jwk = NULL;
     FILE *tty = NULL;
     char yn = 'x';
@@ -167,8 +157,7 @@ dnld_adv(const char *url)
     fprintf(tty, "The advertisement is signed with the following keys:\n");
 
     json_array_foreach(keys, i, jwk) {
-        if (!jose_jwk_allowed(jwk, true, NULL, "tang.derive") &&
-            !jose_jwk_allowed(jwk, true, NULL, "wrapKey"))
+        if (!jose_jwk_allowed(jwk, true, "verify"))
             continue;
 
         fprintf(tty, "\t%s\n", json_string_value(json_object_get(jwk, "kid")));
@@ -181,22 +170,19 @@ dnld_adv(const char *url)
     }
 
 egress:
-    json_decref(keys);
-
     if(tty)
         fclose(tty);
 
     if (strchr("Yy", yn))
-        return adv;
+        return json_incref(adv);
 
-    json_decref(adv);
     return NULL;
 }
 
 static json_t *
 select_jwk(json_t *jws)
 {
-    json_t *jwkset = NULL;
+    json_auto_t *jwkset = NULL;
     json_t *jwk = NULL;
     size_t i = 0;
 
@@ -205,31 +191,24 @@ select_jwk(json_t *jws)
         return NULL;
 
     json_array_foreach(json_object_get(jwkset, "keys"), i, jwk) {
-        if (jose_jwk_allowed(jwk, true, NULL, "tang.derive") ||
-            jose_jwk_allowed(jwk, true, NULL, "wrapKey")) {
-            jwk = json_incref(jwk);
-            json_decref(jwkset);
-            return jwk;
-        }
+        if (jose_jwk_allowed(jwk, true, "deriveKey"))
+            return json_incref(jwk);
     }
 
-    json_decref(jwkset);
     return NULL;
 }
 
 static int
 encrypt(int argc, char *argv[])
 {
-    int ret = EXIT_FAILURE;
+    jose_buf_auto_t *key = NULL;
+    json_auto_t *jws = NULL;
+    json_auto_t *cfg = NULL;
+    json_auto_t *jwk = NULL;
+    json_auto_t *jwe = NULL;
+    json_auto_t *cek = NULL;
+    json_auto_t *ste = NULL;
     const char *url = NULL;
-    json_t *jws = NULL;
-    json_t *cfg = NULL;
-    json_t *jwk = NULL;
-    json_t *jwe = NULL;
-    json_t *cek = NULL;
-    json_t *ste = NULL;
-    uint8_t *ky = NULL;
-    size_t kyl = 0;
 
     cfg = json_loads(argv[2], 0, NULL);
     if (!cfg) {
@@ -237,8 +216,8 @@ encrypt(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    ky = readkey(stdin, &kyl);
-    if (!ky) {
+    key = readkey(stdin);
+    if (!key) {
         fprintf(stderr, "Error reading key!\n");
         json_decref(cfg);
         return EXIT_FAILURE;
@@ -246,7 +225,7 @@ encrypt(int argc, char *argv[])
 
     if (json_unpack(cfg, "{s:s,s?o}", "url", &url, "adv", &jws) != 0) {
         fprintf(stderr, "Invalid configuration!\n");
-        goto egress;
+        return EXIT_FAILURE;
     }
 
     if (json_is_string(jws))
@@ -257,7 +236,7 @@ encrypt(int argc, char *argv[])
         json_t *keys = adv_vld(jws);
         if (!keys) {
             fprintf(stderr, "Specified advertisement is invalid!\n");
-            goto egress;
+            return EXIT_FAILURE;
         }
 
         json_decref(keys);
@@ -266,17 +245,17 @@ encrypt(int argc, char *argv[])
     jwk = select_jwk(jws);
     if (!jwk) {
         fprintf(stderr, "Error selecting remote public key!\n");
-        goto egress;
+        return EXIT_FAILURE;
     }
 
     cek = json_pack("{s:s,s:i}", "kty", "oct", "bytes", 32);
     if (!cek)
-        goto egress;
+        return EXIT_FAILURE;
 
     ste = adv_rep(jwk, cek);
     if (!ste) {
         fprintf(stderr, "Error creating binding!\n");
-        goto egress;
+        return EXIT_FAILURE;
     }
 
     jwe = json_pack("{s:{s:s,s:s},s:{s:{s:s,s:O,s:O}}}",
@@ -290,57 +269,44 @@ encrypt(int argc, char *argv[])
                             "adv", jws);
     if (!jwe) {
         fprintf(stderr, "Error creating JWE template!\n");
-        goto egress;
+        return EXIT_FAILURE;
     }
 
-    if (!jose_jwe_encrypt(jwe, cek, ky, kyl)) {
+    if (!jose_jwe_encrypt(jwe, cek, key->data, key->size)) {
         fprintf(stderr, "Error encrypting key!\n");
-        goto egress;
+        return EXIT_FAILURE;
     }
 
     if (json_dumpf(jwe, stdout, JSON_SORT_KEYS | JSON_COMPACT) != 0)
-        goto egress;
+        return EXIT_FAILURE;
 
-    ret = EXIT_SUCCESS;
-
-egress:
-    memset(ky, 0, kyl);
-    json_decref(jws);
-    json_decref(cfg);
-    json_decref(jwk);
-    json_decref(jwe);
-    json_decref(cek);
-    json_decref(ste);
-    free(ky);
-    return ret;
+    return EXIT_SUCCESS;
 }
 
 static int
 decrypt(int argc, char *argv[])
 {
-    int ret = EXIT_FAILURE;
+    jose_buf_auto_t *key = NULL;
+    json_auto_t *jwe = NULL;
+    json_auto_t *req = NULL;
+    json_auto_t *rep = NULL;
+    json_auto_t *cek = NULL;
     const char *url = NULL;
     json_t *ste = NULL;
-    json_t *jwe = NULL;
-    json_t *req = NULL;
-    json_t *rep = NULL;
-    json_t *cek = NULL;
-    uint8_t *ky = NULL;
     char *type = NULL;
-    size_t kyl = 0;
     int r = 0;
 
     jwe = json_loadf(stdin, 0, NULL);
     if (!jwe)
-        goto egress;
+        return EXIT_FAILURE;
 
     if (json_unpack(jwe, "{s:{s:{s:s,s:o}}}", "unprotected", "clevis.pin.tang",
                     "url", &url, "ste", &ste) != 0)
-        goto egress;
+        return EXIT_FAILURE;
 
     req = rec_req(ste);
     if (!req)
-        goto egress;
+        return EXIT_FAILURE;
 
     if (json_object_get(req, "kty"))
         type = "application/jwk+json";
@@ -350,30 +316,20 @@ decrypt(int argc, char *argv[])
     r = http_json(url, "rec", HTTP_POST,
                   type, req, "application/jwk+json", &rep);
     if (r != 200)
-        goto egress;
+        return EXIT_FAILURE;
 
     cek = rec_rep(ste, rep);
     if (!cek)
-        goto egress;
+        return EXIT_FAILURE;
 
-    ky = jose_jwe_decrypt(jwe, cek, &kyl);
-    if (!ky)
-        goto egress;
+    key = jose_jwe_decrypt(jwe, cek);
+    if (!key)
+        return EXIT_FAILURE;
 
-    if (fwrite(ky, kyl, 1, stdout) != 1)
-        goto egress;
+    if (fwrite(key->data, key->size, 1, stdout) != 1)
+        return EXIT_FAILURE;
 
-    ret = EXIT_SUCCESS;
-
-egress:
-    if (ky)
-        memset(ky, 0, kyl);
-    json_decref(req);
-    json_decref(rep);
-    json_decref(cek);
-    json_decref(jwe);
-    free(ky);
-    return ret;
+    return EXIT_SUCCESS;
 }
 
 static double
@@ -417,42 +373,41 @@ nagios_recover(const char *url, const json_t *jwk,
                size_t *sig, size_t *rec, json_t *time)
 {
     const char *kid = NULL;
-    json_t *state = NULL;
-    json_t *bef = NULL;
-    json_t *aft = NULL;
-    json_t *req = NULL;
-    json_t *rep = NULL;
+    json_auto_t *state = NULL;
+    json_auto_t *bef = NULL;
+    json_auto_t *aft = NULL;
+    json_auto_t *req = NULL;
+    json_auto_t *rep = NULL;
     char *type = NULL;
     bool ret = false;
     double s = 0;
     double e = 0;
     int r = 0;
 
-    if (jose_jwk_allowed(jwk, true, NULL, "verify")) {
+    if (jose_jwk_allowed(jwk, true, "verify")) {
         *sig += 1;
         return true;
     }
 
-    if (!jose_jwk_allowed(jwk, true, NULL, "deriveKey") &&
-        !jose_jwk_allowed(jwk, true, NULL, "wrapKey"))
+    if (!jose_jwk_allowed(jwk, true, "deriveKey"))
         return true;
 
     bef = json_pack("{s:s,s:i}", "kty", "oct", "bytes", 16);
     if (!bef) {
         printf("Error creating JWK template!\n");
-        goto egress;
+        return false;
     }
 
     state = adv_rep(jwk, bef);
     if (!state) {
         printf("Error creating binding!\n");
-        goto egress;
+        return false;
     }
 
     req = rec_req(state);
     if (!req) {
         printf("Error preparing recovery request!\n");
-        goto egress;
+        return false;
     }
 
     if (json_object_get(req, "kty"))
@@ -470,39 +425,31 @@ nagios_recover(const char *url, const json_t *jwk,
         else
             printf("Error performing recovery! HTTP Status %d\n", r);
 
-        goto egress;
+        return false;
     }
 
     if (json_unpack((json_t *) jwk, "{s:s}", "kid", &kid) != 0)
-        goto egress;
+        return false;
 
     if (s == 0.0 || e == 0.0 ||
         json_object_set_new(time, kid, json_real(e - s)) < 0) {
         printf("Error calculating performance metrics!\n");
-        goto egress;
+        return false;
     }
 
     aft = rec_rep(state, rep);
     if (!aft) {
         printf("Error handing recovery result!\n");
-        goto egress;
+        return false;
     }
 
     if (!json_equal(bef, aft)) {
         printf("Recovered key doesn't match!\n");
-        goto egress;
+        return false;
     }
 
     *rec += 1;
-    ret = true;
-
-egress:
-    json_decref(state);
-    json_decref(bef);
-    json_decref(aft);
-    json_decref(req);
-    json_decref(rep);
-    return ret;
+    return true;
 }
 
 static int
@@ -513,10 +460,11 @@ nagios(int argc, char *argv[])
         NAGIOS_WARN = 1,
         NAGIOS_CRIT = 2,
         NAGIOS_UNKN = 3
-    } ret = NAGIOS_CRIT;
-    json_t *time = NULL;
-    json_t *keys = NULL;
-    json_t *adv = NULL;
+    };
+
+    json_auto_t *time = NULL;
+    json_auto_t *keys = NULL;
+    json_auto_t *adv = NULL;
     size_t sig = 0;
     size_t rec = 0;
     double s = 0;
@@ -525,7 +473,7 @@ nagios(int argc, char *argv[])
 
     time = json_object();
     if (!time)
-        goto egress;
+        return NAGIOS_CRIT;
 
     s = curtime();
     r = http_json(argv[2], "adv", HTTP_GET, NULL, NULL,
@@ -537,30 +485,30 @@ nagios(int argc, char *argv[])
         else
             printf("Error fetching advertisement! HTTP Status %d\n", r);
 
-        goto egress;
+        return NAGIOS_CRIT;
     }
 
     if (s == 0.0 || e == 0.0 ||
         json_object_set_new(time, "adv", json_real(e - s)) != 0) {
         printf("Error calculating performance metrics!\n");
-        goto egress;
+        return NAGIOS_CRIT;
     }
 
     keys = adv_vld(adv);
     if (!keys) {
         printf("Error validating advertisement!\n");
-        goto egress;
+        return NAGIOS_CRIT;
     }
 
     for (size_t i = 0; i < json_array_size(keys); i++) {
         json_t *jwk = json_array_get(keys, i);
         if (!nagios_recover(argv[2], jwk, &sig, &rec, time))
-            goto egress;
+            return NAGIOS_CRIT;
     }
 
     if (rec == 0) {
         printf("Advertisement contains no recovery keys!\n");
-        goto egress;
+        return NAGIOS_CRIT;
     }
 
     json_object_set_new(time, "nkeys", json_integer(json_array_size(keys)));
@@ -570,13 +518,7 @@ nagios(int argc, char *argv[])
     printf("OK|");
     dump_perf(time);
     printf("\n");
-    ret = NAGIOS_OK;
-
-egress:
-    json_decref(time);
-    json_decref(keys);
-    json_decref(adv);
-    return ret;
+    return NAGIOS_OK;
 }
 
 int

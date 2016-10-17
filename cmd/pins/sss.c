@@ -460,10 +460,9 @@ cmd_decrypt(int argc, char *argv[])
     }
 
     if (nchldrn(&chldrn, true) >= (size_t) t) {
+        jose_buf_auto_t *pt = NULL;
         const uint8_t *xy[t];
         json_t *cek = NULL;
-        uint8_t *pt = NULL;
-        size_t ptl = 0;
         size_t i = 0;
 
         for (struct pin *pin = chldrn.next; pin != &chldrn; pin = pin->next) {
@@ -475,15 +474,12 @@ cmd_decrypt(int argc, char *argv[])
         if (!cek)
             goto egress;
 
-        pt = jose_jwe_decrypt(jwe, cek, &ptl);
+        pt = jose_jwe_decrypt(jwe, cek);
         json_decref(cek);
         if (!pt)
             goto egress;
 
-        fwrite(pt, ptl, 1, stdout);
-        memset(pt, 0, ptl);
-        free(pt);
-
+        fwrite(pt->data, pt->size, 1, stdout);
         ret = EXIT_SUCCESS;
     }
 
