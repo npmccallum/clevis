@@ -1,0 +1,12 @@
+#!/bin/bash -e
+
+if [ $# -ne 0 ]; then
+    echo "Usage: `basename $0` < JWE" >&2
+    exit 1
+fi
+
+jwe=`cat <&0`
+pth=`realpath $0`
+dir=`dirname $pth`
+pin=`echo "$jwe" | $dir/clevis-pin`
+echo "$jwe" | exec $dir/clevis-pin-$pin decrypt

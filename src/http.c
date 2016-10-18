@@ -17,7 +17,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "libhttp.h"
+#include "http.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -329,7 +329,8 @@ http(const char *url, enum http_method m,
         struct ctx ctx = { .msg = *rep };
         http_parser parser = {};
 
-        close(sock);
+        if (sock >= 0)
+            close(sock);
 
         sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (sock < 0)
@@ -383,6 +384,7 @@ egress:
 
     url_free_contents(&purl);
     freeaddrinfo(ais);
-    close(sock);
+    if (sock >= 0)
+        close(sock);
     return -errno;
 }

@@ -1,0 +1,10 @@
+#!/bin/bash
+
+if [ $# -ne 2 ]; then
+    echo "Usage: `basename $0` PIN CONFIG" >&2
+    exit 1
+fi
+
+pth=`realpath $0`
+dir=`dirname $pth`
+exec $dir/clevis-pin-$1 encrypt "$2"

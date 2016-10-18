@@ -6,7 +6,7 @@ PORT=`shuf -i 1024-65535 -n 1`
 
 python tests/httpd.py $PORT &
 export PID=$!
-sleep 1
+sleep 0.25
 
 function onerr() {
     kill -9 $PID
@@ -16,8 +16,8 @@ function onerr() {
 
 trap 'onerr' ERR
 
-e=`echo hi | cmd/encrypt http "{\"url\": \"http://localhost:${PORT}/foo\"}"`
-d=`echo $e | cmd/decrypt`
+e=`echo hi | src/clevis-encrypt http "{\"url\": \"http://localhost:${PORT}/foo\"}"`
+d=`echo $e | src/clevis-decrypt`
 test "$d" == "hi"
 
 kill -9 $PID
@@ -25,4 +25,4 @@ kill -9 $PID
 
 trap 'exit' ERR
 
-! echo $e | cmd/decrypt
+! echo $e | src/clevis-decrypt

@@ -1,21 +1,18 @@
-AM_CFLAGS = @CLEVIS_CFLAGS@ @jose_CFLAGS@ @luksmeta_CFLAGS@ @udisks2_CFLAGS@
+AM_CFLAGS = @CLEVIS_CFLAGS@ @jose_CFLAGS@
+LDADD = @jose_LIBS@ libreadall.la
 
-EXTRA_DIST = clevis-luks-udisks2.desktop.in
-CLEANFILES = clevis-luks-udisks2.desktop
+noinst_LTLIBRARIES = libhttp.la libreadall.la
+dist_bin_SCRIPTS = clevis clevis-decrypt clevis-encrypt clevis-luks-bind clevis-luks-list
+check_PROGRAMS = clevis-pin-test
+bin_PROGRAMS = clevis-pin clevis-pin-http clevis-pin-sss clevis-pin-tang
 
-autostartdir = $(sysconfdir)/xdg/autostart
-autostart_DATA = clevis-luks-udisks2.desktop
+libreadall_la_SOURCES = readall.c readall.h
 
-libexec_PROGRAMS = clevis-luks-udisks2
-clevis_luks_udisks2_LDADD = @luksmeta_LIBS@ @udisks2_LIBS@
+libhttp_la_SOURCES = http.c http.h
+libhttp_la_LIBADD = -lhttp_parser
 
-install-exec-hook:
-	if [ -x $(DESTDIR)$(libexecdir)/clevis-luks-udisks2 ]; then \
-	    chmod 4711 $(DESTDIR)$(libexecdir)/clevis-luks-udisks2; \
-	fi
+clevis_pin_sss_SOURCES = clevis-pin-sss.c sss.c sss.h
+clevis_pin_http_LDADD = $(LDADD) libhttp.la
 
-%: %.in
-	$(AM_V_GEN)$(SED) \
-		-e 's,@libexecdir\@,$(libexecdir),g' \
-		$(srcdir)/$@.in > $@
-
+clevis_pin_tang_SOURCES = tang.c tang.h clevis-pin-tang.c
+clevis_pin_tang_LDADD = $(LDADD) libhttp.la

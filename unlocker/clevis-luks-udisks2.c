@@ -64,7 +64,7 @@ get_decrypt_path(char *path, size_t pathl)
     if (readlink("/proc/self/exe", tmp, sizeof(tmp) - 1) < 0)
         return false;
 
-    if (snprintf(path, pathl, "%s/clevis/decrypt", dirname(tmp)) < 0)
+    if (snprintf(path, pathl, "%s/../bin/clevis-decrypt", dirname(tmp)) < 0)
         return false;
 
     return true;

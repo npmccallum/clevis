@@ -38,7 +38,8 @@ tang_validate(const json_t *jws);
  * Returns a JWE along with headers required for recovery.
  */
 bool
-tang_bind(json_t *jwe, json_t *cek, const json_t *jwk, const char *url);
+tang_bind(json_t *jwe, json_t *cek, const json_t *jwk,
+          const char *url, const json_t *adv);
 
 /**
  * Creates the recovery request from the JWE.

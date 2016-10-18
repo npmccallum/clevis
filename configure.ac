@@ -47,8 +47,5 @@ CLEVIS_CFLAGS="\
 "
 AC_SUBST([CLEVIS_CFLAGS])
 
-AC_SUBST([CLEVIS_PINDIR], [${libdir}/${PACKAGE_NAME}/pins])
-AX_DEFINE_DIR(CLEVIS_PINDIR, CLEVIS_PINDIR, [Location of pins (plugins)])
-
-AC_CONFIG_FILES([Makefile src/Makefile cmd/Makefile cmd/pins/Makefile])
+AC_CONFIG_FILES([Makefile src/Makefile unlocker/Makefile])
 AC_OUTPUT

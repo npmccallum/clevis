@@ -17,7 +17,8 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "libhttp.h"
+#include "readall.h"
+#include "http.h"
 
 #include <jose/b64.h>
 #include <jose/jwk.h>
@@ -25,50 +26,16 @@
 
 #include <string.h>
 
-static uint8_t *
-readall(FILE *file, size_t *len)
-{
-    uint8_t *out = NULL;
-
-    *len = 0;
-
-    while (true) {
-        uint8_t *tmp = NULL;
-        size_t r = 0;
-
-        tmp = realloc(out, *len + 16);
-        if (!tmp)
-            break;
-        out = tmp;
-
-        r = fread(&out[*len], 1, 16, file);
-        *len += r;
-        if (r < 16) {
-            if (ferror(file) || *len == 0)
-                break;
-            if (feof(file))
-                return out;
-        }
-    }
-
-    if (out)
-        memset(out, 0, *len);
-
-    free(out);
-    return NULL;
-}
-
 static int
 encrypt(int argc, char *argv[])
 {
+    jose_buf_auto_t *pt = NULL;
+    json_auto_t *cfg = NULL;
+    json_auto_t *cek = NULL;
+    json_auto_t *jwe = NULL;
     int ret = EXIT_FAILURE;
     const char *url = NULL;
     uint8_t ky[32] = {};
-    json_t *cfg = NULL;
-    json_t *cek = NULL;
-    json_t *jwe = NULL;
-    uint8_t *pt = NULL;
-    size_t ptl = 0;
     int r = 0;
 
     struct http_msg *rep = NULL;
@@ -81,7 +48,7 @@ encrypt(int argc, char *argv[])
         .size = sizeof(ky)
     };
 
-    pt = readall(stdin, &ptl);
+    pt = readall(stdin);
     if (!pt)
         return EXIT_FAILURE;
 
@@ -99,16 +66,16 @@ encrypt(int argc, char *argv[])
     if (!jose_jwk_generate(cek))
         goto egress;
 
-    jwe = json_pack("{s:{s:s,s:s},s:{s:{s:s}}}",
+    jwe = json_pack("{s:{s:s},s:{s:s,s:s}}",
                     "protected",
                         "alg", "dir",
-                        "clevis.pin", "http",
                     "unprotected",
-                        "clevis.pin.http", "url", url);
+                        "clevis.pin", "http",
+                        "clevis.http.url", url);
     if (!jwe)
         goto egress;
 
-    if (!jose_jwe_encrypt(jwe, cek, pt, ptl))
+    if (!jose_jwe_encrypt(jwe, cek, pt->data, pt->size))
         goto egress;
 
     if (!jose_b64_decode_json_buf(json_object_get(cek, "k"), ky))
@@ -123,12 +90,7 @@ encrypt(int argc, char *argv[])
     ret = EXIT_SUCCESS;
 
 egress:
-    memset(pt, 0, ptl);
     http_msg_free(rep);
-    json_decref(cfg);
-    json_decref(cek);
-    json_decref(jwe);
-    free(pt);
     return ret;
 }
 
@@ -136,10 +98,11 @@ static int
 decrypt(int argc, char *argv[])
 {
     jose_buf_auto_t *pt = NULL;
+    json_auto_t *cek = NULL;
+    json_auto_t *jwe = NULL;
+    json_auto_t *hdr = NULL;
     int ret = EXIT_FAILURE;
     const char *url = NULL;
-    json_t *cek = NULL;
-    json_t *jwe = NULL;
     int r = 0;
 
     struct http_msg *rep = NULL;
@@ -154,8 +117,11 @@ decrypt(int argc, char *argv[])
     if (!jwe)
         goto egress;
 
-    if (json_unpack(jwe, "{s:{s:{s:s}}}", "unprotected", "clevis.pin.http",
-                    "url", &url) != 0)
+    hdr = jose_jwe_merge_header(jwe, jwe);
+    if (!hdr)
+        goto egress;
+
+    if (json_unpack(hdr, "{s:s}", "clevis.http.url", &url) != 0)
         goto egress;
 
     r = http(url, HTTP_GET, &req, &rep);
@@ -187,8 +153,6 @@ decrypt(int argc, char *argv[])
 
 egress:
     http_msg_free(rep);
-    json_decref(cek);
-    json_decref(jwe);
     return ret;
 }
 
