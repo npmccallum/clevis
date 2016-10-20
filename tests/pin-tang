@@ -26,11 +26,17 @@ function on_exit() {
 trap 'on_exit' EXIT
 trap 'exit' ERR
 
-if SD_ACTIVATE=`which systemd-socket-activate`; then
-  INET=--inet
-else
-  SD_ACTIVATE=/usr/lib/systemd/systemd-activate
-fi
+for cmd in systemd-socket-activate \
+    `pkg-config --variable=systemdutildir systemd`/systemd-activate; do
+    if SD_ACTIVATE=`which $cmd`; then
+        if $SD_ACTIVATE --help | grep -q inetd; then
+            SD_ACTIVATE="$SD_ACTIVATE --inetd"
+        fi
+        break
+    fi
+done
+
+[ ! "$SD_ACTIVATE" ] && exit 1
 
 export TMP=`mktemp -d`
 mkdir -p $TMP/db
@@ -43,8 +49,9 @@ jose gen -t '{"kty": "EC", "crv": "P-256", "key_ops": ["deriveKey"] }' -o $TMP/d
 
 # Start the server
 port=`shuf -i 1024-65536 -n 1`
-$SD_ACTIVATE $INET -l 127.0.0.1:$port -a /usr/libexec/tangd $TMP/cache &
+$SD_ACTIVATE -l 127.0.0.1:$port -a /usr/libexec/tangd $TMP/cache &
 export PID=$!
+sleep 0.25
 
 adv="$TMP/cache/default.jws"
 url="http://localhost:${port}"
