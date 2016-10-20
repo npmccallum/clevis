@@ -13,6 +13,7 @@ LT_INIT([disable-static])
 PKG_PROG_PKG_CONFIG([0.25])
 
 PKG_CHECK_MODULES([jose], [jose-openssl jose-zlib])
+PKG_CHECK_MODULES([libcrypto], [libcrypto])
 PKG_CHECK_MODULES([luksmeta], [luksmeta])
 PKG_CHECK_MODULES([udisks2], [udisks2])
 

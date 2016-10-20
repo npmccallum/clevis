@@ -12,7 +12,9 @@ libhttp_la_SOURCES = http.c http.h
 libhttp_la_LIBADD = -lhttp_parser
 
 clevis_pin_sss_SOURCES = clevis-pin-sss.c sss.c sss.h
+clevis_pin_sss_LDADD = $(LDADD) @libcrypto_LIBS@
+
 clevis_pin_http_LDADD = $(LDADD) libhttp.la
 
 clevis_pin_tang_SOURCES = tang.c tang.h clevis-pin-tang.c
-clevis_pin_tang_LDADD = $(LDADD) libhttp.la
+clevis_pin_tang_LDADD = $(LDADD) @libcrypto_LIBS@ libhttp.la
