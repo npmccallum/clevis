@@ -2,7 +2,7 @@ AM_CFLAGS = @CLEVIS_CFLAGS@ @jose_CFLAGS@
 LDADD = @jose_LIBS@ libreadall.la
 
 noinst_LTLIBRARIES = libhttp.la libreadall.la
-dist_bin_SCRIPTS = clevis clevis-decrypt clevis-encrypt clevis-luks-bind clevis-luks-list
+dist_bin_SCRIPTS = clevis clevis-decrypt clevis-encrypt clevis-luksbind
 check_PROGRAMS = clevis-pin-test
 bin_PROGRAMS = clevis-pin clevis-pin-http clevis-pin-sss clevis-pin-tang
 
