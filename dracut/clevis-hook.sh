@@ -21,6 +21,8 @@
 
 UUID=cb6e8904-81ff-40da-a84a-07ab9ab5715e
 
+shopt -s nullglob
+
 for question in /run/systemd/ask-password/ask.*; do
     d=
     s=
@@ -34,15 +36,16 @@ for question in /run/systemd/ask-password/ask.*; do
 
     echo "Device: $d" >&2
     echo "Socket: $s" >&2
-    [ -e "$d" -o -e "$s" ] && continue
+    [ -z "$d" -o -z "$s" ] && continue
 
-    luksmeta show -d "$d" | while read -r -a row; do
+    while read -r -a row; do
         [ "${row[1]}" != "active" ] && continue
         [ "${row[2]}" != "$UUID" ] && continue
         n=${row[0]}
 
         if pt="`luksmeta load -d $d -s $n -u $UUID | clevis decrypt`"; then
-            echo "+$pt" | nc -U -u --send-only "$s"
+            echo -n "+$pt" | nc -U -u --send-only "$s"
+            break;
         fi
-    done
+    done < <(luksmeta show -d "$d")
 done
