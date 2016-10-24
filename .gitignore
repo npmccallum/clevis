@@ -41,3 +41,5 @@ src/clevis-pin-tang
 src/clevis-pin-test
 tags
 test-driver
+udisks2/clevis-luks-udisks2
+udisks2/clevis-luks-udisks2.desktop
