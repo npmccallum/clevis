@@ -19,11 +19,11 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-if [ $# -ne 2 ]; then
-    echo "Usage: `basename $0` PIN CONFIG" >&2
+if [ $# -lt 1 ]; then
+    echo "Usage: `basename $0` COMMAND [...]" >&2
     exit 1
 fi
 
-pth=`realpath $0`
-dir=`dirname $pth`
-exec $dir/clevis-pin-$1 encrypt "$2"
+cmd=`realpath $0`-$1
+shift
+exec $cmd "$@"
