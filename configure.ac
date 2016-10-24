@@ -48,5 +48,5 @@ CLEVIS_CFLAGS="\
 "
 AC_SUBST([CLEVIS_CFLAGS])
 
-AC_CONFIG_FILES([Makefile src/Makefile dracut/Makefile unlocker/Makefile])
+AC_CONFIG_FILES([Makefile src/Makefile dracut/Makefile udisks2/Makefile])
 AC_OUTPUT
