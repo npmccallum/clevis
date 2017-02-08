@@ -24,15 +24,17 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
+#include <sys/un.h>
 
-#include <signal.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <termios.h>
 #include <unistd.h>
 
 #define _str(x) # x
@@ -40,28 +42,67 @@
 
 #define EPE(evts, efd) (&(struct epoll_event) { (evts), { .fd = (efd) } })
 
-static int pwd = -1;
+enum jsonrpc_error {
+    JSONRPC_ERROR_PARSE_ERROR = -32700,
+    JSONRPC_ERROR_INVALID_REQUEST = -32600,
+    JSONRPC_ERROR_METHOD_NOT_FOUND = -32601,
+    JSONRPC_ERROR_INVALID_PARAMS = -32602,
+    JSONRPC_ERROR_INTERNAL_ERROR = -32603,
+};
 
-static bool
-open_socket(int sock[2])
+static struct termios old = {};
+static json_t *reg = NULL;
+static int tty = -1;
+
+static int
+random_b64(char *str, size_t len)
 {
-    char sockstr[32] = {};
+    uint8_t buf[jose_b64_dlen(len)];
+    int fd = 0;
 
-    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sock) < 0) {
-        fprintf(stderr, "Error creating socket: %s\n", strerror(errno));
-        return false;
+    fd = open("/dev/urandom", O_RDONLY);
+    if (fd < 0)
+        return -errno;
+
+    for (ssize_t all = 0, now = 0; all < (ssize_t) sizeof(buf); all += now) {
+        now = read(fd, &buf[all], sizeof(buf) - all);
+        if (now < 0) {
+            close(fd);
+            return -errno;
+        }
     }
 
-    if (fcntl(sock[1], F_SETFD, FD_CLOEXEC) < 0) {
-        fprintf(stderr, "Error settings FD_CLOEXEC: %s\n", strerror(errno));
-        close(sock[0]);
-        close(sock[1]);
-        return false;
+    jose_b64_encode_buf(buf, sizeof(buf), str);
+    close(fd);
+    return 0;
+}
+
+static int
+open_socket(void)
+{
+    struct sockaddr_un addr = {};
+    int fd = 0;
+
+    fd = random_b64(&addr.sun_path[1], sizeof(addr.sun_path) - 2);
+    if (fd < 0)
+        return fd;
+
+    fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return -errno;
+
+    if (bind(fd, &addr, sizeof(addr)) < 0) {
+        close(fd);
+        return -errno;
     }
 
-    snprintf(sockstr, sizeof(sockstr), "%d", sock[0]);
-    setenv("CLEVIS_SOCKET", sockstr, 1);
-    return true;
+    if (listen(fd, 1024) < 0) {
+        close(fd);
+        return -errno;
+    }
+
+    setenv("CLEVIS_SOCKET", &addr.sun_path[1], 1);
+    return fd;
 }
 
 static bool
@@ -141,66 +182,214 @@ start_child(int argc, char *argv[])
 }
 
 static bool
-receive_fd(int epfd, int fd)
+on_connect(int epfd, int fd)
 {
-    struct msghdr msg = {
-        .msg_control = &(char[256]) {},
-        .msg_controllen = 256,
-        .msg_iov = &(struct iovec) {
-            .iov_base = &(char[256]) {},
-            .iov_len = 256,
-        },
-        .msg_iovlen = 1,
-    };
+    struct ucred ucred = {};
+    socklen_t len = sizeof(ucred);
+    int sock;
 
-    if (recvmsg(fd, &msg, 0) < 0) {
-        fprintf(stderr, "Error receiving message: %s\n", strerror(errno));
-        return false;
+    sock = accept(fd, NULL, NULL);
+    if (sock < 0)
+        return true;
+
+    if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &ucred, &len) < 0) {
+        close(sock);
+        return true;
     }
 
-    fd = 0;
-    memcpy(&fd, CMSG_DATA(CMSG_FIRSTHDR(&msg)), sizeof(fd));
-
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, fd, EPE(EPOLLIN | EPOLLPRI, fd)) < 0) {
-        fprintf(stderr, "Error creating epoll watch: %s\n", strerror(errno));
-        close(fd);
-        return false;
+    if (ucred.uid != getuid() ||
+        ucred.gid != getgid() ||
+        ucred.pid == 0        ||
+        getpgid(ucred.pid) != getpid()) {
+        fprintf(stderr, "Connection PID %d was rejected\n", ucred.pid);
+        close(sock);
+        return true;
     }
+
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sock,
+                  EPE(EPOLLIN | EPOLLPRI | EPOLLRDHUP, sock)) < 0)
+        close(sock);
 
     return true;
 }
 
 static bool
-receive_pwd(int epfd, int fd)
+on_password(int epfd, int fd)
 {
+    static json_t *pwd = NULL;
+    const json_t *jfd = NULL;
+    json_auto_t *tmp = NULL;
+    const char *tok = NULL;
+    char c = 0;
+
+    if (read(fd, &c, 1) != 1)
+        return false;
+
+    if (c != '\n') {
+        tmp = pwd;
+        pwd = json_pack("s+%", pwd ? json_string_value(pwd) : "", &c, 1);
+        return true;
+    }
+
+    json_object_foreach(json_object_get(reg, "lcl"), tok, jfd) {
+        json_auto_t *req = NULL;
+
+        req = json_pack("{s:s,s:s,s:s,s:{s:O}}", "jsonrpc", "2.0", "id", tok,
+                        "method", "clevis.pwd.check", "params", "pwd", pwd);
+        json_dumpfd(req, json_integer_value(jfd),
+                    JSON_COMPACT | JSON_SORT_KEYS);
+    }
 }
 
-enum jsonrpc_error {
-    JSONRPC_ERROR_PARSE_ERROR = -32700,
-    JSONRPC_ERROR_INVALID_REQUEST = -32600,
-    JSONRPC_ERROR_METHOD_NOT_FOUND = -32601,
-    JSONRPC_ERROR_INVALID_PARAMS = -32602,
-    JSONRPC_ERROR_INTERNAL_ERROR = -32603,
-};
+static void
+close_tty(int epfd)
+{
+    if (tty < 0)
+        return;
+
+    epoll_ctl(epfd, EPOLL_CTL_DEL, tty, NULL);
+    tcsetattr(tty, TCSANOW, &old);
+    close(tty);
+    tty = -1;
+}
 
 static json_t *
-handle_password_register(const json_t *id, const json_t *params)
+clevis_pwd_query(int epfd, int fd, const json_t *id, const json_t *params)
 {
+    json_auto_t *reply = NULL;
+    json_t *section = NULL;
+    char token[33] = {};
     int local = false;
 
     if (json_unpack((json_t *) params, "{s?s}", "local", &local) < 0)
-        return json_pack("{s:s,s:O,s:{s:i,s:s}}", "jsonrpc", "2.0", "id", id,
-                         "error", "code", JSONRPC_ERROR_INVALID_PARAMS,
-                         "message", "Invalid parameters");
+        return json_pack("{s:s,s:O,s:{s:i,s:s}}",
+                         "jsonrpc", "2.0", "id", id,
+                         "error",
+                            "code", JSONRPC_ERROR_INVALID_PARAMS,
+                            "message", "Invalid parameters");
 
-    /* Register passsword handler */
-#error TODO
+    if (random_b64(token, sizeof(token) - 1) < 0)
+        goto error;
+
+    section = json_object_get(reg, local ? "lcl" : "rem");
+    if (json_object_set_new(section, token, json_integer(fd)) < 0)
+        goto error;
+
+    reply = json_pack("{s:s,s:O,s:{s:s}}",
+                      "jsonrpc", "2.0", "id", id,
+                      "result", "id", token);
+    if (!reply)
+        goto error;
+
+    if (tty < 0) {
+        struct termios new = {};
+
+        tty = open("/dev/tty", O_RDWR);
+        if (tty < 0)
+            goto error;
+
+        if (tcgetattr(tty, &old) < 0) {
+            close(tty);
+            tty = -1;
+            goto error;
+        }
+
+        new = old;
+        new.c_lflag &= ~ECHO;
+        new.c_lflag |= ICANON;
+        new.c_lflag |= ECHONL;
+
+        if (tcsetattr(tty, TCSANOW, &new) < 0) {
+            close_tty(epfd);
+            goto error;
+        }
+
+        if (epoll_ctl(epfd, EPOLL_CTL_ADD, tty,
+                      EPE(EPOLLIN | EPOLLPRI | EPOLLRDHUP, tty)) < 0) {
+            close_tty(epfd);
+            goto error;
+        }
+
+        if (dprintf(tty, "Password: ") < 0) {
+            close_tty(epfd);
+            goto error;
+        }
+    }
+
+    return json_incref(reply);
+
+error:
+    return json_pack("{s:s,s:O,s:{s:i,s:s}}", "jsonrpc", "2.0",
+                     "id", id, "error", "code",
+                     JSONRPC_ERROR_INTERNAL_ERROR,
+                     "message", "Internal error");
+}
+
+static bool
+unregister(const char *token, int fd)
+{
+    const char *name = NULL;
+    bool unreg = false;
+    json_t *sec = NULL;
+    size_t cnt = 0;
+
+    json_object_foreach(reg, name, sec) {
+        const char *tok = NULL;
+        json_t *jfd = NULL;
+
+        json_object_foreach(sec, tok, jfd) {
+            if (unreg)
+                continue;
+
+            if (token && strcmp(token, tok) != 0)
+                continue;
+
+            if (!json_is_integer(jfd))
+                continue;
+
+            if (json_integer_value(jfd) != fd)
+                continue;
+
+            unreg = json_object_del(sec, tok) == 0;
+        }
+
+        cnt += json_object_size(sec);
+    }
+
+    if (cnt == 0 && tty >= 0)
+        close_tty();
+
+    return unreg;
+}
+
+static json_t *
+clevis_pwd_abort(int epfd, int fd, const json_t *id, const json_t *params)
+{
+    const char *token = NULL;
+
+    if (json_unpack((json_t *) params, "{s:s}", "id", &token) < 0)
+        return json_pack("{s:s,s:O,s:{s:i,s:s}}",
+                         "jsonrpc", "2.0", "id", id,
+                         "error",
+                            "code", JSONRPC_ERROR_INVALID_PARAMS,
+                            "message", "Invalid parameters");
+
+    unregister(token, fd);
 
     return json_pack("{s:s,s:O,s:{}}", "jsonrpc", "2.0", "id", id, "result");
 }
 
+static struct {
+    const char *cmd;
+    json_t *(*fnc)(int epfd, int fd, const json_t *id, const json_t *params);
+} methods[] = {
+    { "clevis.pwd.query", clevis_pwd_query },
+    { "clevis.pwd.abort", clevis_pwd_abort },
+    {}
+};
+
 static bool
-handle_request(int epfd, int fd)
+on_request(int epfd, int fd)
 {
     const json_t *params = NULL;
     const json_t *id = NULL;
@@ -215,8 +404,8 @@ handle_request(int epfd, int fd)
     size = recv(fd, pkt, sizeof(pkt), 0);
     if (size < 0) { /* Remove the closed fd */
         epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+        unregister(NULL, fd);
         close(fd);
-#error remove pwd registration
         return true;
     }
 
@@ -237,20 +426,24 @@ handle_request(int epfd, int fd)
         goto reply;
     }
 
-    if (strcmp(cmd, "clevis.pwd.reg") != 0) {
-        rep = json_pack("{s:s,s:O,s:{s:i,s:s}}", "jsonrpc", "2.0", "id", id,
-                        "error", "code", JSONRPC_ERROR_METHOD_NOT_FOUND,
-                        "message", "Method not found");
+    for (size_t i = 0; methods[i].cmd; i++) {
+        if (strcmp(cmd, methods[i].cmd) != 0)
+            continue;
+
+        rep = methods[i].fnc(epfd, fd, id, params);
         goto reply;
     }
 
-    rep = handle_password_register(id, params);
+    rep = json_pack("{s:s,s:O,s:{s:i,s:s}}", "jsonrpc", "2.0", "id", id,
+                    "error", "code", JSONRPC_ERROR_METHOD_NOT_FOUND,
+                    "message", "Method not found");
+
+reply:
     if (!rep)
         rep = json_pack("{s:s,s:O,s:{s:i,s:s}}", "jsonrpc", "2.0", "id", id,
                         "error", "code", JSONRPC_ERROR_INTERNAL_ERROR,
                         "message", "Internal error");
 
-reply:
     msg = json_dumps(rep, JSON_COMPACT | JSON_SORT_KEYS);
     if (!msg) /* OOM */
         return false;
@@ -279,56 +472,51 @@ int
 main(int argc, char *argv[])
 {
     struct epoll_event event = {};
-    int sock[2] = { -1, -1 };
+    int sock = -1;
     int epfd = -1;
+
+    reg = json_pack("{s:{},s:{}}", "remote", "local");
 
     signal(SIGCHLD, on_sigchld);
 
-    if (!open_socket(sock))
-        return EXIT_FAILURE;
-
-    if (!start_child(argc, argv)) {
-        close(sock[0]);
-        close(sock[1]);
-        return EXIT_FAILURE;
+    if (getsid(0) != getpid() && setsid() < 0) {
+        fprintf(stderr, "Unable to create session: %s\n", strerror(errno));
+        goto error;
     }
 
     epfd = epoll_create1(EPOLL_CLOEXEC);
-    close(sock[0]);
     if (epfd < 0) {
         fprintf(stderr, "Error creating epoll: %s\n", strerror(errno));
-        close(sock[1]);
-        return EXIT_FAILURE;
+        goto error;
     }
 
-    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sock[1],
-                  EPE(EPOLLIN | EPOLLPRI, sock[1])) < 0) {
+    sock = open_socket();
+    if (sock < 0) {
+        fprintf(stderr, "Unable to open socket: %s", strerror(-sock));
+        goto error;
+    }
+
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sock,
+                  EPE(EPOLLIN | EPOLLRDHUP | EPOLLPRI, sock)) < 0) {
         fprintf(stderr, "Error creating epoll watch: %s\n", strerror(errno));
-        close(sock[1]);
-        close(epfd);
-        return EXIT_FAILURE;
+        goto error;
     }
 
-    while (epoll_wait(epfd, &event, 1, -1) > 0) {
-        bool success = false;
+    if (!start_child(argc, argv))
+        goto error;
 
-        if (event.data.fd == sock[1])
-            success = receive_fd(epfd, event.data.fd);
-        else if (event.data.fd == pwd)
-            success = receive_pwd(epfd, event.data.fd);
+    for (bool s = true; s && epoll_wait(epfd, &event, 1, -1) > 0; ) {
+        if (event.data.fd == sock)
+            s = on_connect(epfd, event.data.fd);
+        else if (event.data.fd == tty)
+            s = on_password(epfd, event.data.fd);
         else
-            success = handle_request(epfd, event.data.fd);
-
-        if (!success)
-            goto error;
+            s = on_request(epfd, event.data.fd);
     }
-
-    close(sock[1]);
-    close(epfd);
-    return EXIT_SUCCESS;
 
 error:
-    close(sock[1]);
-    close(epfd);
+    if (sock >= 0) close(sock);
+    if (epfd >= 0) close(epfd);
+    json_decref(reg);
     return EXIT_FAILURE;
 }

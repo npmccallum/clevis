@@ -9,7 +9,7 @@ libreadall_a_SOURCES = libreadall.c libreadall.h
 
 libhttp_a_SOURCES = libhttp.c libhttp.h
 
-pin_PROGRAMS = http sss tang
+pin_PROGRAMS = http sss tang pwd
 
 http_LDADD = $(LDADD) libhttp.a -lhttp_parser
 
