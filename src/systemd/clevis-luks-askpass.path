@@ -1,1 +1,8 @@
+[Unit]
+Description=Clevis systemd-ask-password Watcher
+
+[Path]
 PathChanged=/run/systemd/ask-password
+
+[Install]
+WantedBy=remote-cryptsetup-pre.target
