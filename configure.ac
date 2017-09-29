@@ -18,6 +18,7 @@ PKG_CHECK_MODULES([udisks2], [udisks2])
 PKG_CHECK_MODULES([jose], [jose >= 8])
 PKG_CHECK_MODULES([systemd], [systemd])
 PKG_CHECK_MODULES([dracut], [dracut])
+PKG_CHECK_MODULES([audit], [audit])
 
 AC_ARG_WITH([dracutmodulesdir],
 	    [AS_HELP_STRING([--with-dracutmodulesdir=DIR], [Directory for dracut modules])],
