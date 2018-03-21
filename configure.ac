@@ -102,6 +102,7 @@ AC_CONFIG_FILES([
     src/systemd/Makefile
     src/udisks2/Makefile
     src/dracut/Makefile
+    src/kms/Makefile
     tests/Makefile
     src/Makefile
     Makefile

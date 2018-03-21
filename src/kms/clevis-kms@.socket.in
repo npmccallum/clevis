@@ -1,0 +1,11 @@
+[Unit]
+Description=Clevis KMS Daemon Socket for %I
+
+[Socket]
+ListenStream=@runstatedir@/clevis-kms-%i.socket
+SocketGroup=kube
+SocketUser=kube
+SocketMode=0660
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,44 @@
+#!/bin/bash
+
+function on_error() {
+    exit 1
+}
+
+function usage() {
+    echo "Usage: clevis kms add [-m MODE] -n NAME PIN CFG" >&2
+    exit 1
+}
+
+mode=aescbc
+while getopts ":m:n:" o; do
+    case "$o" in
+        m) mode=$OPTARG;;
+        n) name=$OPTARG;;
+        *) usage;;
+    esac
+done
+
+[ -n "$name" ] || usage
+[ $# -eq 2 ] || usage
+
+case "$mode" in
+    aescbc) bytes=32;;
+    *) echo "Invalid mode '$mode'!" >&2; exit 1;;
+esac
+
+trap on_error ERR
+
+jwe=`dd if=/dev/urandom bs=1 count=$bytes | clevis encrypt "$1" "$2"`
+
+user="clevis-kms-$name"
+path="@localstatedir@/db/clevis/kms/$name"
+
+groupadd -r "$user"
+useradd -r -g "$user" -d "$path" -s /sbin/nologin "$user"
+
+mkdir -m 0770 -p "$path"
+chown "$user:$user" "$path"
+
+echo -n "$jwe" > "$path/jwe"
+
+systemctl enable --now clevis-kms@$name.socket

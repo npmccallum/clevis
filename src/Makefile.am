@@ -1,4 +1,4 @@
-SUBDIRS=dracut systemd udisks2 .
+SUBDIRS=dracut systemd udisks2 kms .
 
 AM_CFLAGS = \
     @CLEVIS_CFLAGS@ \
