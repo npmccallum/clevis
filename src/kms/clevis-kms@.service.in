@@ -3,3 +3,5 @@ Description=Clevis KMS Daemon Service for %I
 
 [Service]
 ExecStart=@libexecdir@/kms --command "@bindir@/clevis decrypt < @localstatedir@/db/clevis/kms/%i.jwe"
+Group=clevis-kms-%i
+User=clevis-kms-%i
